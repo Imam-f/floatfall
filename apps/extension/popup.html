@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>floatfall</title>
+    <style>
+      :root { color-scheme: dark; font: 12px/1.4 system-ui, "Segoe UI", sans-serif; }
+      body { margin: 0; background: #12151b; color: #d8dce3; }
+      .popup { width: 260px; padding: 12px; }
+      .row { display: flex; align-items: center; gap: 8px; }
+      .dot { width: 8px; height: 8px; border-radius: 50%; background: #4a505c; }
+      .dot.ok { background: #3ccf8e; box-shadow: 0 0 6px #3ccf8e; }
+      .label { margin-top: 12px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: #8a919e; }
+      .video { margin-top: 2px; font-weight: 600; word-break: break-word; }
+      .muted { color: #8a919e; }
+      .mono { font-family: ui-monospace, Consolas, monospace; font-size: 11px; }
+      p { margin: 6px 0 0; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

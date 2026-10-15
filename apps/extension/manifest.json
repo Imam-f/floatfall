@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "floatfall",
+  "version": "0.1.0",
+  "description": "Sends the active YouTube video and its playback position to the floatfall desktop piano roll.",
+  "minimum_chrome_version": "116",
+  "permissions": ["tabs", "alarms", "storage"],
+  "host_permissions": ["*://*.youtube.com/*"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.youtube.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "floatfall",
+    "default_popup": "popup.html"
+  }
+}
