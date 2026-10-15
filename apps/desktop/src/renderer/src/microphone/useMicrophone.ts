@@ -2,6 +2,7 @@ import { useEffect } from "react"
 import type { MicrophoneDevice } from "../../../shared/microphone"
 import { PITCH_BUFFER_SIZE, VoicePitchTracker } from "./pitch"
 import { useMicrophoneState } from "./store"
+import { sampleSpectrum } from "./spectrum"
 
 const explainError = (error: unknown): string => {
   const name = error instanceof DOMException ? error.name : ""
@@ -68,6 +69,9 @@ export const useMicrophone = () => {
         context = new AudioContext({ latencyHint: "interactive" })
         analyser = context.createAnalyser()
         analyser.fftSize = PITCH_BUFFER_SIZE
+        analyser.minDecibels = -90
+        analyser.maxDecibels = -20
+        analyser.smoothingTimeConstant = 0.35
         source = context.createMediaStreamSource(stream)
         source.connect(analyser) // Deliberately no speaker connection or mic monitoring.
         await context.resume()
@@ -80,12 +84,17 @@ export const useMicrophone = () => {
         api.reportMicrophone({ captureId, status: "listening", error: null, devices: inputs })
         const tracker = new VoicePitchTracker()
         const input = new Float32Array(PITCH_BUFFER_SIZE)
+        const fft = new Uint8Array(analyser.frequencyBinCount)
         timer = window.setInterval(() => {
           if (disposed || stopped || !context || !analyser) return
           if (context.state !== "running") { fail(new Error("Microphone audio was interrupted. Retry to resume.")); return }
           try {
             analyser.getFloatTimeDomainData(input)
-            api.reportPitch(captureId, tracker.detect(input, context.sampleRate))
+            analyser.getByteFrequencyData(fft)
+            api.reportPitch(captureId, {
+              ...tracker.detect(input, context.sampleRate),
+              spectrum: sampleSpectrum(fft, context.sampleRate, analyser.fftSize)
+            })
           } catch (error) { fail(error) }
         }, 60)
       } catch (error) { fail(error) }

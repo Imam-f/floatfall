@@ -2,6 +2,7 @@ import { memo } from "react"
 import { noteFromFrequency } from "./pitch"
 import { useMicrophoneState, usePitch } from "./store"
 import { PitchHistory } from "./PitchHistory"
+import { Spectrogram } from "./Spectrogram"
 
 const api = window.floatfall
 const stop = () => api.setMicrophoneOptions({ enabled: false })
@@ -73,12 +74,20 @@ export const MicrophonePanel = memo(function MicrophonePanel({ floating = false 
         ) : <>
           <PitchReadout listening={state.status === "listening"} octaveUp={state.octaveUp} />
           <div className="voice-history-heading">
-            <span>Recent pitch <small>12 s</small></span>
+            <div className="voice-history-mode">
+              <button type="button" className="voice-spectrum-toggle" role="switch" aria-checked={state.spectrum}
+                aria-label="Glowing spectrum" title="Switch between the glowing spectrum and pitch line"
+                onClick={() => api.setMicrophoneOptions({ spectrum: !state.spectrum })}>
+                <span className="voice-switch-track" aria-hidden="true"><span /></span>
+                Spectrum
+              </button>
+              <small>12 s</small>
+            </div>
             <button type="button" className={`voice-octave-btn${state.octaveUp ? " active" : ""}`}
               aria-pressed={state.octaveUp} title="Shift the displayed voice and history up one octave"
               onClick={() => api.setMicrophoneOptions({ octaveUp: !state.octaveUp })}>+1 octave</button>
           </div>
-          <PitchHistory octaveUp={state.octaveUp} />
+          {state.spectrum ? <Spectrogram octaveUp={state.octaveUp} /> : <PitchHistory octaveUp={state.octaveUp} />}
         </>}
         <label className="voice-device-label">
           <span className="sr-only">Microphone input</span>

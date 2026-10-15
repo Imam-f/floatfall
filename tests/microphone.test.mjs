@@ -48,7 +48,7 @@ test("one capture owner, docking, close/off, permissions, and stale-capture prot
   const snapshot = (sender = main.webContents) => handlers.get("floatfall:microphone-snapshot")({ sender })
   const options = (value, sender = main.webContents) => ipcMain.emit("floatfall:microphone-options", { sender }, value)
   const report = (captureId, sender = main.webContents) => ipcMain.emit("floatfall:microphone-report", { sender }, { captureId, status: "listening", error: null })
-  const frame = { frequency: 440, level: 0.3, clarity: 1, at: 1 }
+  const frame = { frequency: 440, level: 0.3, clarity: 1, at: 1, spectrum: Array(144).fill(120) }
   try {
     assert.equal(snapshot().state.enabled, false)
     assert.equal(main.webContents.session.check(main.webContents, "media", "", { mediaType: "audio" }), false)
@@ -60,10 +60,25 @@ test("one capture owner, docking, close/off, permissions, and stale-capture prot
     report(capture)
     ipcMain.emit("floatfall:report-pitch", event, capture, frame)
     assert.equal(snapshot().pitch.frequency, 440)
+    assert.deepEqual(snapshot().pitch.spectrum, frame.spectrum)
+    assert.equal(snapshot().state.spectrum, true)
+    options({ spectrum: false })
+    assert.equal(snapshot().state.spectrum, false)
+    assert.equal(snapshot().state.captureId, capture, "changing visualization keeps the same capture")
+    assert.deepEqual(snapshot().history.at(-1).spectrum, frame.spectrum, "line mode retains spectrum history")
+    for (const spectrum of [Array(145).fill(0), Array(144).fill(NaN), Array(144).fill(256), "invalid"]) {
+      ipcMain.emit("floatfall:report-pitch", event, capture, { ...frame, frequency: 880, spectrum })
+      assert.equal(snapshot().pitch.frequency, 440, "invalid spectrum frames are discarded")
+    }
     options({ mode: "floating" })
     assert.equal(windows.length, 1)
     const floating = windows[0]
     assert.equal(snapshot(floating.webContents).pitch.frequency, 440, "new windows get the current pitch")
+    assert.equal(snapshot(floating.webContents).state.spectrum, false, "pop-out keeps the visualization preference")
+    assert.deepEqual(snapshot(floating.webContents).history.at(-1).spectrum, frame.spectrum)
+    options({ spectrum: true }, floating.webContents)
+    assert.equal(snapshot().state.spectrum, true, "floating windows can toggle the visualization")
+    assert.equal(snapshot().state.captureId, capture)
     assert.equal(snapshot().state.captureId, capture, "pop-out must not restart capture")
     ipcMain.emit("floatfall:report-pitch", { sender: floating.webContents }, capture, { ...frame, frequency: 880 })
     assert.equal(snapshot().pitch.frequency, 440, "display windows cannot produce audio frames")
@@ -98,4 +113,23 @@ test("one capture owner, docking, close/off, permissions, and stale-capture prot
   assert.equal(handlers.size, 0)
   assert.equal(ipcMain.eventNames().length, 0)
   assert.equal(main.webContents.session.check, null)
+})
+
+test("spectrum preserves fundamentals and harmonics on the same musical scale at common sample rates", async () => {
+  const result = await build({
+    entryPoints: ["apps/desktop/src/renderer/src/microphone/spectrum.ts"],
+    write: false, bundle: true, format: "esm", platform: "node",
+  })
+  const { sampleSpectrum } = await import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString("base64")}`)
+  for (const sampleRate of [44100, 48000]) {
+    const fft = new Uint8Array(2048)
+    fft[Math.round(440 / (sampleRate / 4096))] = 230
+    fft[Math.round(880 / (sampleRate / 4096))] = 180
+    const spectrum = sampleSpectrum(fft, sampleRate, 4096)
+    assert.equal(spectrum.length, 144)
+    assert.equal(spectrum[72], 230, "A4 fundamental is visible")
+    assert.equal(spectrum[96], 180, "A5 harmonic is visible")
+    assert.equal(spectrum[120], 0, "quiet frequencies remain dark")
+    assert.ok(sampleSpectrum(new Uint8Array(2048), sampleRate, 4096).every(value => value === 0))
+  }
 })

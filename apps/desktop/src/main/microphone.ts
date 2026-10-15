@@ -1,7 +1,7 @@
 import { BrowserWindow, ipcMain, screen, type IpcMainEvent } from "electron"
 import { Channels } from "../shared/ipc"
 import {
-  appendPitchHistory, initialMicrophoneState, type MicrophoneOptions, type MicrophoneReport,
+  appendPitchHistory, initialMicrophoneState, SPECTRUM_BINS, type MicrophoneOptions, type MicrophoneReport,
   type MicrophoneSnapshot, type MicrophoneState, type PitchFrame
 } from "../shared/microphone"
 
@@ -52,6 +52,7 @@ export const attachMicrophone = (main: BrowserWindow, createFloating: () => Brow
       ...state, enabled, deviceId,
       mode: options.mode === "overlay" || options.mode === "floating" ? options.mode : state.mode,
       octaveUp: typeof options.octaveUp === "boolean" ? options.octaveUp : state.octaveUp,
+      spectrum: typeof options.spectrum === "boolean" ? options.spectrum : state.spectrum,
       ...(restart ? {
         captureId: state.captureId + 1, status: enabled ? "requesting" as const : "off" as const, error: null
       } : {})
@@ -91,6 +92,8 @@ export const attachMicrophone = (main: BrowserWindow, createFloating: () => Brow
     if (event.sender !== main.webContents || !state.enabled || state.status !== "listening" || captureId !== state.captureId) return
     if (frame && (!(frame.frequency === null || (Number.isFinite(frame.frequency) && frame.frequency >= 50 && frame.frequency <= 2000)) ||
       !Number.isFinite(frame.level) || !Number.isFinite(frame.clarity))) return
+    if (frame?.spectrum !== undefined && (!Array.isArray(frame.spectrum) || frame.spectrum.length !== SPECTRUM_BINS ||
+      !frame.spectrum.every((value) => Number.isInteger(value) && value >= 0 && value <= 255))) return
     pitch = frame ? { ...frame, level: Math.max(0, Math.min(1, frame.level)), at: Date.now() } : null
     if (pitch) history = appendPitchHistory(history, pitch)
     send(Channels.pitch, pitch)

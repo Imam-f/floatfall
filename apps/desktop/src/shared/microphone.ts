@@ -8,6 +8,7 @@ export interface MicrophoneState {
   readonly mode: "overlay" | "floating"
   readonly deviceId: string
   readonly octaveUp: boolean
+  readonly spectrum: boolean
   /** Changes on restart so late permission grants and frames can be discarded. */
   readonly captureId: number
   readonly status: "off" | "requesting" | "listening" | "error"
@@ -15,7 +16,7 @@ export interface MicrophoneState {
   readonly devices: ReadonlyArray<MicrophoneDevice>
 }
 
-export type MicrophoneOptions = Partial<Pick<MicrophoneState, "enabled" | "mode" | "deviceId" | "octaveUp">>
+export type MicrophoneOptions = Partial<Pick<MicrophoneState, "enabled" | "mode" | "deviceId" | "octaveUp" | "spectrum">>
 
 export interface MicrophoneReport {
   readonly captureId: number
@@ -29,6 +30,8 @@ export interface PitchFrame {
   readonly clarity: number
   readonly level: number
   readonly at: number
+  /** Log-spaced FFT magnitudes, 0..255 from quiet to loud. */
+  readonly spectrum?: ReadonlyArray<number>
 }
 
 export interface MicrophoneSnapshot {
@@ -38,10 +41,13 @@ export interface MicrophoneSnapshot {
 }
 
 export const PITCH_HISTORY_MS = 12000
+export const SPECTRUM_BINS = 144
+export const SPECTRUM_MIN_HZ = 55
+export const SPECTRUM_MAX_HZ = 3520
 export const appendPitchHistory = (history: ReadonlyArray<PitchFrame>, frame: PitchFrame): ReadonlyArray<PitchFrame> =>
   [...history.filter((point) => point.at >= frame.at - PITCH_HISTORY_MS && point.at !== frame.at), frame].slice(-240)
 
 export const initialMicrophoneState: MicrophoneState = {
-  enabled: false, mode: "overlay", deviceId: "default", octaveUp: false, captureId: 0,
+  enabled: false, mode: "overlay", deviceId: "default", octaveUp: false, spectrum: true, captureId: 0,
   status: "off", error: null, devices: []
 }
