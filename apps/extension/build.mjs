@@ -9,8 +9,9 @@ const watch = process.argv.includes("--watch")
 
 await rm(outdir, { recursive: true, force: true })
 await mkdir(outdir, { recursive: true })
-await cp(join(root, "manifest.json"), join(outdir, "manifest.json"))
-await cp(join(root, "popup.html"), join(outdir, "popup.html"))
+// Static files live in ./static (not the package root) so the source folder
+// cannot be mistaken for the loadable extension; load ./dist instead.
+await cp(join(root, "static"), outdir, { recursive: true })
 
 const common = {
   bundle: true,

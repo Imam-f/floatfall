@@ -11,14 +11,18 @@ let alive = true
 let video: HTMLVideoElement | null = null
 let driftTimer: ReturnType<typeof setInterval> | undefined
 
+declare global {
+  // Lets a freshly injected copy detect a still-working previous copy.
+  var __floatfallContentAlive: (() => boolean) | undefined
+}
+
 const post = (message: ContentMessage) => {
   if (!alive) return
   try {
     void chrome.runtime.sendMessage(message).catch(() => undefined)
   } catch {
     // Extension was reloaded/updated: this script is orphaned, go quiet.
-    alive = false
-    detach()
+    teardown()
   }
 }
 
@@ -46,9 +50,32 @@ const reportTitle = () => {
   if (title) post({ _tag: "Title", videoId: id, title })
 }
 
+/** True while YouTube is playing a pre/mid-roll ad in the main player. */
+const adShowing = () => !!document.querySelector("#movie_player.ad-showing, .html5-video-player.ad-showing")
+
+let lastDuration: { videoId: string; duration: number | null } | null = null
+
+const reportDuration = () => {
+  const id = currentVideoId()
+  // During ads the <video> element reports the ad's duration; wait for the real one.
+  if (!video || !id || adShowing()) return
+  const raw = video.duration
+  if (Number.isNaN(raw)) return // metadata not loaded yet
+  const duration = Number.isFinite(raw) ? raw : null // Infinity => live stream
+  if (lastDuration?.videoId === id && lastDuration.duration === duration) return
+  lastDuration = { videoId: id, duration }
+  post({ _tag: "Duration", videoId: id, duration })
+}
+
 const updateDriftTimer = () => {
   const playing = !!video && !video.paused
-  if (playing && driftTimer === undefined) driftTimer = setInterval(reportPlayback, DRIFT_SYNC_MS)
+  if (playing && driftTimer === undefined) {
+    driftTimer = setInterval(() => {
+      // Also catches the real duration once an ad finishes (deduped, cheap).
+      reportDuration()
+      reportPlayback()
+    }, DRIFT_SYNC_MS)
+  }
   if (!playing && driftTimer !== undefined) {
     clearInterval(driftTimer)
     driftTimer = undefined
@@ -56,11 +83,22 @@ const updateDriftTimer = () => {
 }
 
 const onMediaEvent = () => {
+  reportDuration()
   reportPlayback()
   updateDriftTimer()
 }
 
-const EVENTS = ["play", "playing", "pause", "seeked", "ratechange", "waiting", "ended", "loadedmetadata"] as const
+const EVENTS = [
+  "play",
+  "playing",
+  "pause",
+  "seeked",
+  "ratechange",
+  "waiting",
+  "ended",
+  "loadedmetadata",
+  "durationchange"
+] as const
 
 function detach() {
   if (video) for (const event of EVENTS) video.removeEventListener(event, onMediaEvent)
@@ -81,24 +119,42 @@ const attach = () => {
 }
 
 const onNavigate = () => {
+  lastDuration = null
   attach()
   reportPlayback()
   // The title DOM settles shortly after SPA navigation.
   setTimeout(reportTitle, 800)
 }
 
-document.addEventListener("yt-navigate-finish", onNavigate)
-window.addEventListener("pageshow", onNavigate)
-
 // The player element may appear after document_idle.
 const observer = new MutationObserver(() => {
   if (!video || !video.isConnected) attach()
 })
-observer.observe(document.documentElement, { childList: true, subtree: true })
 
-chrome.runtime.onMessage.addListener((raw: BackgroundToContent) => {
+const onSeek = (raw: BackgroundToContent) => {
   if (raw?._tag !== "Seek" || typeof raw.time !== "number" || raw.videoId !== currentVideoId() || !video) return
   video.currentTime = Math.max(0, Math.min(raw.time, Number.isFinite(video.duration) ? video.duration : raw.time))
-})
+}
 
-onNavigate()
+function teardown() {
+  alive = false
+  detach()
+  observer.disconnect()
+  document.removeEventListener("yt-navigate-finish", onNavigate)
+  window.removeEventListener("pageshow", onNavigate)
+}
+
+// The background re-injects this script into open tabs after an extension
+// install/reload. Skip if a working copy is already running here.
+if (!globalThis.__floatfallContentAlive?.()) {
+  globalThis.__floatfallContentAlive = () => {
+    // An orphaned copy loses its runtime id.
+    if (alive && !chrome.runtime?.id) teardown()
+    return alive
+  }
+  document.addEventListener("yt-navigate-finish", onNavigate)
+  window.addEventListener("pageshow", onNavigate)
+  observer.observe(document.documentElement, { childList: true, subtree: true })
+  chrome.runtime.onMessage.addListener(onSeek)
+  onNavigate()
+}

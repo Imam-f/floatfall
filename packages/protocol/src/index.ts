@@ -75,7 +75,9 @@ export const ServerMessageJson = Schema.fromJsonString(ServerMessage)
 
 export const ContentMessage = Schema.Union([
   Schema.TaggedStruct("Playback", { playback: Playback }),
-  Schema.TaggedStruct("Title", { videoId: Schema.String, title: Schema.String })
+  Schema.TaggedStruct("Title", { videoId: Schema.String, title: Schema.String }),
+  /** Length of the main video (not an ad). `null` = live stream / unknown. */
+  Schema.TaggedStruct("Duration", { videoId: Schema.String, duration: Schema.NullOr(Schema.Number) })
 ])
 export type ContentMessage = typeof ContentMessage.Type
 

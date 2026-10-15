@@ -1,11 +1,15 @@
 {
   "name": "@floatfall/desktop",
+  "productName": "floatfall",
   "private": true,
   "version": "0.1.0",
   "description": "Floating piano-roll transcriber for YouTube tabs",
   "main": "./out/main/index.js",
   "scripts": {
+    "ensure-electron": "node -e \"require('electron')\"",
+    "predev": "npm run ensure-electron",
     "dev": "electron-vite dev",
+    "prepreview": "npm run ensure-electron",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "typecheck": "tsc -p tsconfig.node.json && tsc -p tsconfig.web.json"

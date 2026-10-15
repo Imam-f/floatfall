@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "description": "Sends the active YouTube video and its playback position to the floatfall desktop piano roll.",
   "minimum_chrome_version": "116",
-  "permissions": ["tabs", "alarms", "storage"],
+  "permissions": ["tabs", "alarms", "storage", "scripting"],
   "host_permissions": ["*://*.youtube.com/*"],
   "background": {
     "service_worker": "background.js",

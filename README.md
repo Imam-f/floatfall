@@ -31,6 +31,8 @@ npm.cmd run dev               # starts the desktop app (Electron downloads itsel
 
 To load the extension, open `chrome://extensions`, turn on Developer mode, click **Load unpacked**, and select `apps/extension/dist`.
 
+Only videos of 7 minutes or less are detected (`MAX_VIDEO_SECONDS` in `packages/protocol/src/lite.ts`). The content script reports the length of the main video, ignoring ads. The extension ignores longer videos and live streams, and the popup explains why. As a backup, the desktop app also passes `--match-filter` to `yt-dlp`.
+
 The extension connects to `ws://127.0.0.1:47615`. The green dot in the window title bar shows that it is connected.
 
 ## Plugging in models
@@ -67,6 +69,32 @@ Your separator and transcriber commands must follow these rules:
   - JSON format: `{"notes":[{"pitch":60,"start":1.25,"end":1.5,"velocity":0.8}]}` or a bare array. `pitch` is a MIDI note number and times are in seconds.
   - MIDI format: a standard `.mid` file.
 - **Progress (optional):** print lines that contain `NN%` and the title bar shows a progress bar. A non-zero exit code shows the last lines of the tool's output in the window.
+
+### MuScriptor (melody transcription)
+
+`models/muscriptor_transcribe.py` is a [uv](https://docs.astral.sh/uv/) script that runs [MuScriptor](https://huggingface.co/MuScriptor/muscriptor-medium). Its dependencies are listed inside the script itself and pinned in `models/muscriptor_transcribe.py.lock`.
+
+1. Accept the licence on the model page. The weights are gated and licensed CC BY-NC 4.0, and you must have the rights to the audio you transcribe.
+2. Authenticate once with `uvx hf auth login`, or set `HF_TOKEN`.
+3. Point the transcriber at the script:
+
+```jsonc
+"sampleRate": 16000,  // MuScriptor works at 16 kHz internally
+"transcriber": {
+  "command": "uv",
+  "args": ["run", "--script", "<repo>/models/muscriptor_transcribe.py", "{input}", "{output}"],
+  "output": "json"
+}
+```
+
+Options you can add to `args` after `{output}`:
+
+- `--model small|medium|large` (default `medium`).
+- `--instruments voice`, the default, which only allows the singing-voice group. Pass `""` to allow every instrument.
+- `--poly` keeps chords. By default the output is reduced to one line, keeping the highest pitch at each moment.
+- `--device cuda`.
+
+CPU wheels are used by default. The script header shows how to switch torch to the CUDA index.
 
 To test the plumbing without a real model, use the stubs in `examples/`:
 

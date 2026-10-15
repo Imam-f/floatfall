@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto"
-import { type Note, TranscriptionFile, type Video } from "@floatfall/protocol"
+import { MAX_VIDEO_SECONDS, type Note, TranscriptionFile, type Video } from "@floatfall/protocol"
 import { Midi } from "@tonejs/midi"
 import { Cache, Context, Data, Duration, Effect, Exit, FileSystem, Layer, Path, Schema } from "effect"
 import type { Stage } from "../../shared/ipc"
@@ -129,6 +129,9 @@ export class Pipeline extends Context.Service<Pipeline, {
           args: [
             "--no-playlist",
             "--newline",
+            // Safety net in case something other than the extension sends a long video.
+            "--match-filter",
+            `duration <= ${MAX_VIDEO_SECONDS} & !is_live`,
             "-f",
             s.downloadFormat,
             "--progress-template",
@@ -140,7 +143,12 @@ export class Pipeline extends Context.Service<Pipeline, {
           onLine: (line) => r.line(line, YTDLP_PROGRESS)
         }).pipe(Effect.mapError(fromToolError("downloading")))
         const media = yield* findMedia(dir)
-        if (!media) return yield* fail("downloading", "yt-dlp finished but no media file was found")
+        if (!media) {
+          return yield* fail(
+            "downloading",
+            `No file downloaded. Videos longer than ${MAX_VIDEO_SECONDS / 60} minutes and live streams are skipped.`
+          )
+        }
         return path.join(dir, media)
       })
 

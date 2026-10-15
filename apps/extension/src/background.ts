@@ -4,6 +4,7 @@ import {
   type ClientMessage,
   ClientMessageJson,
   ContentMessage,
+  isEligibleDuration,
   parseVideoId,
   PROTOCOL_VERSION,
   type ServerMessage,
@@ -12,7 +13,7 @@ import {
   watchUrl
 } from "@floatfall/protocol"
 import { Effect, Exit, Fiber, Queue, Schema, Stream, SubscriptionRef } from "effect"
-import { type BridgeStatus, initialStatus, STATUS_KEY } from "./status"
+import { type BridgeStatus, initialStatus, type Skipped, STATUS_KEY } from "./status"
 
 const encodeClient = Schema.encodeSync(ClientMessageJson)
 const decodeServer = Schema.decodeUnknownExit(ServerMessageJson)
@@ -44,8 +45,9 @@ chrome.tabs.onUpdated.addListener((_tabId, change) => {
 })
 chrome.windows.onFocusChanged.addListener(() => poke())
 chrome.runtime.onStartup.addListener(() => poke("wake"))
+const installs = Effect.runSync(Queue.sliding<void>(1))
 chrome.runtime.onInstalled.addListener(() => {
-  void chrome.alarms.create("floatfall-keepalive", { periodInMinutes: 0.5 })
+  Queue.offerUnsafe(installs, undefined)
   poke("wake")
 })
 chrome.alarms.onAlarm.addListener(() => poke("wake"))
@@ -60,10 +62,15 @@ chrome.runtime.onMessage.addListener((raw, sender) => {
 // Program
 // ---------------------------------------------------------------------------
 
-const isVideoTab = (tab: chrome.tabs.Tab): tab is chrome.tabs.Tab & { id: number; url: string } =>
-  tab.id !== undefined && parseVideoId(tab.url) !== null
+type VideoTab = chrome.tabs.Tab & { id: number; url: string }
 
-const toVideo = (tab: chrome.tabs.Tab & { id: number; url: string }, titles: Map<number, string>): Video => {
+const isVideoTab = (tab: chrome.tabs.Tab): tab is VideoTab => tab.id !== undefined && parseVideoId(tab.url) !== null
+
+/** Duration of the main video per tab, as reported by the content script. */
+type DurationEntry = { readonly videoId: string; readonly duration: number | null }
+const DURATIONS_KEY = "floatfall.durations"
+
+const toVideo = (tab: VideoTab, titles: Map<number, string>): Video => {
   const videoId = parseVideoId(tab.url)!
   return {
     videoId,
@@ -83,16 +90,39 @@ const program = Effect.gen(function*() {
   const titles = new Map<number, string>()
   let socket: WebSocket | null = null
 
+  // Durations survive service-worker restarts via storage.session (content
+  // scripts only re-report when the duration changes).
+  const durations = new Map<number, DurationEntry>(
+    yield* Effect.promise(() =>
+      chrome.storage.session.get(DURATIONS_KEY).then((items) =>
+        Object.entries((items[DURATIONS_KEY] ?? {}) as Record<string, DurationEntry>).map(
+          ([tabId, entry]) => [Number(tabId), entry] as const
+        )
+      )
+    )
+  )
+  const persistDurations = Effect.promise(() =>
+    chrome.storage.session.set({ [DURATIONS_KEY]: Object.fromEntries(durations) }).catch(() => undefined)
+  )
+
+  /** Known duration of the video currently shown in `tab`, if reported. */
+  const durationOf = (tab: VideoTab): number | null | undefined => {
+    const entry = durations.get(tab.id)
+    return entry && entry.videoId === parseVideoId(tab.url) ? entry.duration : undefined
+  }
+  const isEligible = (tab: VideoTab) => isEligibleDuration(durationOf(tab))
+
   const send = (message: ClientMessage) =>
     Effect.sync(() => {
       if (socket?.readyState === WebSocket.OPEN) socket.send(encodeClient(message))
     })
 
   /**
-   * Picks the YouTube tab to follow:
-   *  1. the active tab of the focused window, if it is a video
-   *  2. the previously followed tab, if it still shows a video
-   *  3. an audible video tab, else the most recently used video tab
+   * Picks the YouTube tab to follow. Only videos up to MAX_VIDEO_SECONDS are
+   * eligible (unknown duration, live streams and longer videos are ignored):
+   *  1. the active tab of the focused window, if it is an eligible video
+   *  2. the previously followed tab, if it still shows an eligible video
+   *  3. an audible eligible tab, else the most recently used eligible tab
    */
   const pickVideo = Effect.gen(function*() {
     const [focused, all] = yield* Effect.promise(() =>
@@ -102,21 +132,64 @@ const program = Effect.gen(function*() {
       ])
     )
     const videoTabs = all.filter(isVideoTab)
-    const active = focused.find(isVideoTab)
-    if (active) return toVideo(active, titles)
-    const previous = yield* SubscriptionRef.get(current)
-    const stillOpen = previous && videoTabs.find((t) => t.id === previous.tabId)
-    if (stillOpen) return toVideo(stillOpen, titles)
-    const fallback = videoTabs.find((t) => t.audible) ??
-      [...videoTabs].sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0))[0]
-    return fallback ? toVideo(fallback, titles) : null
+
+    // Forget tabs that are gone.
+    const open = new Set(videoTabs.map((t) => t.id))
+    let pruned = false
+    for (const tabId of durations.keys()) {
+      if (!open.has(tabId)) pruned = durations.delete(tabId) || pruned
+    }
+    if (pruned) yield* persistDurations
+
+    const activeTab = focused.find(isVideoTab)
+    const activeDuration = activeTab ? durationOf(activeTab) : undefined
+    const skipped: Skipped | null = activeTab && activeDuration !== undefined && !isEligibleDuration(activeDuration)
+      ? { title: titles.get(activeTab.id) || cleanTabTitle(activeTab.title), duration: activeDuration }
+      : null
+
+    const eligible = videoTabs.filter(isEligible)
+    const pick = (): VideoTab | undefined => {
+      if (activeTab && isEligible(activeTab)) return activeTab
+      const previous = SubscriptionRef.getUnsafe(current)
+      const stillOpen = previous && eligible.find((t) => t.id === previous.tabId)
+      if (stillOpen) return stillOpen
+      return eligible.find((t) => t.audible) ??
+        [...eligible].sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0))[0]
+    }
+    const tab = pick()
+    return { video: tab ? toVideo(tab, titles) : null, skipped }
   })
 
   const refresh = pickVideo.pipe(
-    Effect.flatMap((video) =>
-      SubscriptionRef.modify(current, (prev) => [!sameVideo(prev, video), sameVideo(prev, video) ? prev : video])
+    Effect.flatMap(({ video, skipped }) =>
+      SubscriptionRef.update(current, (prev) => (sameVideo(prev, video) ? prev : video)).pipe(
+        Effect.andThen(
+          SubscriptionRef.update(status, (s) =>
+            s.skipped?.title === skipped?.title && s.skipped?.duration === skipped?.duration ? s : { ...s, skipped }
+          )
+        )
+      )
     ),
     Effect.catchCause(() => Effect.void)
+  )
+
+  // After install/update: keep-alive alarm + inject the content script into
+  // YouTube tabs that were already open (they need it to report durations).
+  yield* Stream.fromQueue(installs).pipe(
+    Stream.runForEach(() =>
+      Effect.promise(async () => {
+        await chrome.alarms.create("floatfall-keepalive", { periodInMinutes: 0.5 })
+        const tabs = await chrome.tabs.query({ url: ["*://*.youtube.com/*"] })
+        await Promise.all(
+          tabs.map((tab) =>
+            tab.id === undefined || tab.discarded
+              ? undefined
+              : chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content.js"] }).catch(() => undefined)
+          )
+        )
+      })
+    ),
+    Effect.forkChild
   )
 
   // Tab signals -> recompute (debounced so bursts of tab events cost one query).
@@ -146,6 +219,14 @@ const program = Effect.gen(function*() {
     Stream.runForEach(({ tabId, message }) =>
       Effect.gen(function*() {
         const video = yield* SubscriptionRef.get(current)
+        if (message._tag === "Duration") {
+          const prev = durations.get(tabId)
+          if (prev?.videoId === message.videoId && prev.duration === message.duration) return
+          durations.set(tabId, { videoId: message.videoId, duration: message.duration })
+          yield* persistDurations
+          poke() // eligibility may have changed
+          return
+        }
         if (message._tag === "Title") {
           titles.set(tabId, message.title)
           if (video?.tabId === tabId && video.videoId === message.videoId && video.title !== message.title) {

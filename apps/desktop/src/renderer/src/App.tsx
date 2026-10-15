@@ -8,7 +8,7 @@ const emptyMessage = (state: UiState): string | null => {
   if (!state.extensionConnected && !state.video) {
     return "Install the floatfall Chrome extension and open a YouTube video."
   }
-  if (!state.video) return "Open a YouTube video in Chrome."
+  if (!state.video) return "Open a YouTube video (7 minutes or shorter) in Chrome."
   switch (state.job.stage) {
     case "error":
       return state.job.message

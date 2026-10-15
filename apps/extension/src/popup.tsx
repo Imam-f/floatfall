@@ -1,4 +1,4 @@
-import { BRIDGE_URL } from "@floatfall/protocol/lite"
+import { BRIDGE_URL, formatDuration, MAX_VIDEO_SECONDS } from "@floatfall/protocol/lite"
 import { StrictMode, useSyncExternalStore } from "react"
 import { createRoot } from "react-dom/client"
 import { type BridgeStatus, initialStatus, STATUS_KEY } from "./status"
@@ -33,7 +33,7 @@ const subscribe = (listener: () => void) => {
 const getStatus = () => status
 
 const Popup = () => {
-  const { connected, video, lastError } = useSyncExternalStore(subscribe, getStatus)
+  const { connected, video, skipped, lastError } = useSyncExternalStore(subscribe, getStatus)
   return (
     <div className="popup">
       <div className="row">
@@ -44,6 +44,12 @@ const Popup = () => {
       <div className="label">Following</div>
       <div className="video">{video ? video.title : <span className="muted">No YouTube video tab</span>}</div>
       {video && <div className="muted mono">{video.videoId}</div>}
+      {skipped && (
+        <p className="warn">
+          Ignoring this tab ({skipped.duration === null ? "live stream" : formatDuration(skipped.duration)}): only
+          videos up to {formatDuration(MAX_VIDEO_SECONDS)} are detected.
+        </p>
+      )}
     </div>
   )
 }
