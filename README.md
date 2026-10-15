@@ -5,12 +5,12 @@
 A Chrome extension and an Electron app that work together. The extension finds the YouTube video you are watching. The desktop app then:
 
 1. downloads a low-quality copy with `yt-dlp`,
-2. extracts mono WAV audio with `ffmpeg`,
-3. optionally cleans the vocals with **your** separator command,
+2. extracts WAV audio with `ffmpeg`, preserving 44.1 kHz stereo when cleaning vocals,
+3. optionally isolates vocals with BS-RoFormer (or **your** separator command), then converts them to mono at the transcription sample rate,
 4. transcribes the melody with **your** transcription command,
 5. shows the notes as a piano roll in a small frameless window that stays on top of other windows. The roll follows the YouTube playhead. Click the roll to seek the video.
 
-The separator and the transcription model are wrappers only. You add the real models later in `settings.json`.
+Model wrappers are included for BS-RoFormer vocal isolation and MuScriptor melody transcription. Configure their commands in `settings.json` as shown below.
 
 ```
 apps/extension   Chrome MV3 extension (Effect background worker, tiny content script, React popup)
@@ -64,15 +64,39 @@ You can use these placeholders in `args`: `{input}`, `{output}`, `{outputDir}`, 
 
 Your separator and transcriber commands must follow these rules:
 
-- **Separator:** read the mono WAV at `{input}` and write the vocal stem as a WAV to `{output}`.
+- **Separator:** read the 44.1 kHz stereo WAV at `{input}` and write the vocal stem as a WAV to `{output}`. The pipeline converts the stem to mono at `sampleRate` before transcription.
 - **Transcriber:** read the WAV at `{input}` and write the notes to `{output}`:
   - JSON format: `{"notes":[{"pitch":60,"start":1.25,"end":1.5,"velocity":0.8}]}` or a bare array. `pitch` is a MIDI note number and times are in seconds.
   - MIDI format: a standard `.mid` file.
 - **Progress (optional):** print lines that contain `NN%` and the title bar shows a progress bar. A non-zero exit code shows the last lines of the tool's output in the window.
 
+### BS-RoFormer (vocal isolation)
+
+`models/separate_vocals.py` runs the BS-RoFormer ViperX 1297 checkpoint through [audio-separator](https://github.com/karaokenerds/python-audio-separator). It uses CUDA on Windows/Linux, downloads the model automatically, and writes only the vocal stem. PyTorch and the separator dependencies are pinned in `models/separate_vocals.py.lock`.
+
+Add this to your desktop settings to enable it:
+
+```jsonc
+"cleanVocals": true,
+"separator": {
+  "command": "uv",
+  "args": ["run", "--locked", "--script", "<repo>/models/separate_vocals.py", "{input}", "{output}"]
+}
+```
+
+If FFmpeg is not on PATH, append `"--ffmpeg", "C:/path/to/ffmpeg.exe"` to the arguments and set `ffmpegPath` to that same executable. The wrapper caches weights under `%LOCALAPPDATA%/floatfall/models/audio-separator` on Windows or `~/.cache/floatfall/models/audio-separator` on Linux. Override this with `--model-dir`. Use `--segment-size 128` if GPU memory is tight; the default is 256 with a batch size of one.
+
+To download the model before processing a video:
+
+```powershell
+uv run --locked --script models/separate_vocals.py --download-only
+```
+
+The app's vocal-cleaning toggle bypasses separation when disabled. Existing stems made from mono audio are not reused by the stereo pipeline.
+
 ### MuScriptor (melody transcription)
 
-`models/muscriptor_transcribe.py` is a [uv](https://docs.astral.sh/uv/) script that runs [MuScriptor](https://huggingface.co/MuScriptor/muscriptor-medium). Its dependencies are listed inside the script itself and pinned in `models/muscriptor_transcribe.py.lock`.
+`models/muscriptor_transcribe.py` is a [uv](https://docs.astral.sh/uv/) script that runs [MuScriptor large](https://huggingface.co/MuScriptor/muscriptor-large) on an NVIDIA GPU by default. Its dependencies are listed inside the script itself and pinned in `models/muscriptor_transcribe.py.lock`.
 
 1. Accept the licence on the model page. The weights are gated and licensed CC BY-NC 4.0, and you must have the rights to the audio you transcribe.
 2. Authenticate once with `uvx hf auth login`, or set `HF_TOKEN`.
@@ -82,19 +106,19 @@ Your separator and transcriber commands must follow these rules:
 "sampleRate": 16000,  // MuScriptor works at 16 kHz internally
 "transcriber": {
   "command": "uv",
-  "args": ["run", "--script", "<repo>/models/muscriptor_transcribe.py", "{input}", "{output}"],
+  "args": ["run", "--locked", "--script", "<repo>/models/muscriptor_transcribe.py", "{input}", "{output}", "--model", "large", "--device", "cuda"],
   "output": "json"
 }
 ```
 
 Options you can add to `args` after `{output}`:
 
-- `--model small|medium|large` (default `medium`).
+- `--model small|medium|large` (default `large`).
 - `--instruments voice`, the default, which only allows the singing-voice group. Pass `""` to allow every instrument.
 - `--poly` keeps chords. By default the output is reduced to one line, keeping the highest pitch at each moment.
-- `--device cuda`.
+- `--device cuda` (default). The script reports an error if CUDA is unavailable. Use `--device cpu` to explicitly run on the CPU.
 
-CPU wheels are used by default. The script header shows how to switch torch to the CUDA index.
+On Windows and Linux, the script installs matching CUDA 12.8 builds of PyTorch and torchaudio from the PyTorch index. Keep your NVIDIA driver up to date; a separate CUDA toolkit installation is not required. The first run downloads the dependencies and model weights. `FLOATFALL_MUSCRIPTOR_MODEL` and `FLOATFALL_MUSCRIPTOR_DEVICE` can override the defaults when the corresponding command-line options are omitted.
 
 To test the plumbing without a real model, use the stubs in `examples/`:
 

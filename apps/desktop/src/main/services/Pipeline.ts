@@ -39,6 +39,10 @@ const shortHash = (value: unknown) => createHash("sha1").update(JSON.stringify(v
 
 const specHashOf = (spec: CommandSpec) => shortHash({ c: spec.command, a: spec.args, w: spec.cwd ?? "" })
 
+// Separator outputs depend on the audio format as well as the model command.
+const separatorHashOf = (spec: CommandSpec) =>
+  shortHash({ spec: specHashOf(spec), sampleRate: 44100, channels: 2 })
+
 const decodeTranscription = Schema.decodeUnknownEffect(Schema.fromJsonString(TranscriptionFile))
 
 const PERCENT = /(\d{1,3}(?:\.\d+)?)\s*%/
@@ -152,16 +156,18 @@ export class Pipeline extends Context.Service<Pipeline, {
         return path.join(dir, media)
       })
 
-      const extractAudio = Effect.fn("Pipeline.extractAudio")(function*(key: JobKey, dir: string, media: string) {
+      const extractAudio = Effect.fn("Pipeline.extractAudio")(function*(
+        key: JobKey, dir: string, media: string, sampleRate: number, channels: number, filename: string
+      ) {
         const s = yield* settings.get
         const r = reporter(key, "extracting")
-        return yield* cached(path.join(dir, `audio.${s.sampleRate}.wav`), (partial) =>
+        return yield* cached(path.join(dir, filename), (partial) =>
           r.start("Extracting audio…").pipe(
             Effect.andThen(
               tools.run({
                 tool: "ffmpeg",
                 command: s.ffmpegPath,
-                args: ["-hide_banner", "-y", "-i", media, "-vn", "-ac", "1", "-ar", String(s.sampleRate), partial]
+                args: ["-hide_banner", "-y", "-i", media, "-vn", "-ac", String(channels), "-ar", String(sampleRate), partial]
               })
             ),
             Effect.mapError(fromToolError("extracting"))
@@ -229,7 +235,12 @@ export class Pipeline extends Context.Service<Pipeline, {
         yield* fs.makeDirectory(dir, { recursive: true }).pipe(Effect.mapError((e) => fail("downloading", e.message)))
 
         const media = yield* download(key, dir)
-        let audio = yield* extractAudio(key, dir, media)
+        let audio = yield* extractAudio(
+          key, dir, media,
+          key.cleanVocals ? 44100 : s.sampleRate,
+          key.cleanVocals ? 2 : 1,
+          key.cleanVocals ? "audio.stereo.44100.wav" : `audio.${s.sampleRate}.wav`
+        )
 
         if (key.cleanVocals) {
           audio = yield* runModel(
@@ -238,7 +249,12 @@ export class Pipeline extends Context.Service<Pipeline, {
             "Vocal separation",
             s.separator,
             audio,
-            path.join(dir, `vocals.${specHashOf(s.separator)}.wav`)
+            path.join(dir, `vocals.${separatorHashOf(s.separator)}.wav`)
+          )
+          // Preserve stereo detail during separation; only then prepare model input.
+          audio = yield* extractAudio(
+            key, dir, audio, s.sampleRate, 1,
+            `audio.vocals.${separatorHashOf(s.separator)}.${s.sampleRate}.wav`
           )
         }
 
@@ -274,7 +290,7 @@ export class Pipeline extends Context.Service<Pipeline, {
                 specHash: shortHash({
                   t: specHashOf(s.transcriber),
                   o: s.transcriber.output,
-                  s: cleanVocals ? specHashOf(s.separator) : null,
+                  s: cleanVocals ? separatorHashOf(s.separator) : null,
                   f: s.downloadFormat,
                   r: s.sampleRate
                 })

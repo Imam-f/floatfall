@@ -2,16 +2,17 @@
 # requires-python = ">=3.10,<3.13"
 # dependencies = [
 #   "muscriptor>=0.3",
+#   "torch>=2.7.1; sys_platform != 'darwin'",
+#   "torchaudio>=2.7.1; sys_platform != 'darwin'",
 # ]
 #
-# # CPU wheels are used by default. For an NVIDIA GPU on Windows/Linux,
-# # uncomment the block below (and add "torch" to dependencies above):
-# # [tool.uv.sources]
-# # torch = { index = "pytorch-cu128" }
-# # [[tool.uv.index]]
-# # name = "pytorch-cu128"
-# # url = "https://download.pytorch.org/whl/cu128"
-# # explicit = true
+# [tool.uv.sources]
+# torch = [{ index = "pytorch-cu128", marker = "sys_platform == 'win32' or sys_platform == 'linux'" }]
+# torchaudio = [{ index = "pytorch-cu128", marker = "sys_platform == 'win32' or sys_platform == 'linux'" }]
+# [[tool.uv.index]]
+# name = "pytorch-cu128"
+# url = "https://download.pytorch.org/whl/cu128"
+# explicit = true
 # ///
 """floatfall transcriber wrapper around MuScriptor (Kyutai x Mirelo).
 
@@ -25,7 +26,7 @@ Contract with the floatfall desktop app (settings.json -> transcriber):
 * logs everything else to stderr, exits non-zero on failure.
 
 The model weights are gated on Hugging Face: accept the licence on
-https://huggingface.co/MuScriptor/muscriptor-medium and authenticate once with
+https://huggingface.co/MuScriptor/muscriptor-large and authenticate once with
 `uvx hf auth login` (or set HF_TOKEN). Weights are CC BY-NC 4.0.
 """
 
@@ -72,8 +73,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("output", type=Path, help="output notes JSON")
     parser.add_argument(
         "--model",
-        default=os.environ.get("FLOATFALL_MUSCRIPTOR_MODEL", "medium"),
-        help="small | medium | large | local .safetensors | hf:// URL (default: medium)",
+        default=os.environ.get("FLOATFALL_MUSCRIPTOR_MODEL", "large"),
+        help="small | medium | large | local .safetensors | hf:// URL (default: large)",
     )
     parser.add_argument(
         "--instruments",
@@ -88,7 +89,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="keep overlapping notes instead of reducing to a single melody line",
     )
-    parser.add_argument("--device", default=None, help="torch device (default: auto)")
+    parser.add_argument(
+        "--device",
+        default=os.environ.get("FLOATFALL_MUSCRIPTOR_DEVICE", "cuda"),
+        help="torch device (default: cuda; pass cpu explicitly for CPU processing)",
+    )
     parser.add_argument(
         "--cfg", type=float, default=1.0, help="classifier-free guidance coefficient"
     )
@@ -151,6 +156,19 @@ def extract_melody(notes: list[Note]) -> list[Note]:
 
 
 def transcribe(args: argparse.Namespace) -> list[Note]:
+    import torch
+
+    device = torch.device(args.device)
+    if device.type == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "CUDA is unavailable. Run this script with uv to install CUDA-enabled "
+                "PyTorch and check your NVIDIA driver, or pass --device cpu explicitly."
+            )
+        log(f"using {device}: {torch.cuda.get_device_name(device)} (PyTorch {torch.__version__})")
+    else:
+        log(f"using {device}")
+
     from muscriptor import NoteEndEvent, NoteStartEvent, TranscriptionModel
     from muscriptor.events import ProgressEvent
     from muscriptor.tokenizer.mt3 import resolve_instrument_names
@@ -200,7 +218,7 @@ def main(argv: list[str]) -> int:
         if is_auth_error(error):
             log(
                 "cannot download MuScriptor weights: accept the licence at "
-                "https://huggingface.co/MuScriptor/muscriptor-medium and run "
+                "https://huggingface.co/MuScriptor/muscriptor-large and run "
                 "`uvx hf auth login` (or set HF_TOKEN)"
             )
             return EXIT_AUTH
