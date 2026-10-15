@@ -11,7 +11,9 @@
     "build": "npm run build -w @floatfall/extension && npm run build -w @floatfall/desktop",
     "build:extension": "npm run build -w @floatfall/extension",
     "build:desktop": "npm run build -w @floatfall/desktop",
-    "typecheck": "npm run typecheck --workspaces --if-present"
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "node --experimental-strip-types --test tests/pitch.test.mts tests/microphone.test.mjs",
+    "test:microphone": "npm run build:desktop && node tests/run-electron-test.mjs"
   },
   "allowScripts": {
     "esbuild@0.28.2": true

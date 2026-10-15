@@ -20,7 +20,13 @@ const api: FloatfallApi = {
   seek: (time) => ipcRenderer.send(Channels.seek, time),
   openSettings: () => ipcRenderer.send(Channels.openSettings),
   openCache: () => ipcRenderer.send(Channels.openCache),
-  window: (action) => ipcRenderer.send(Channels.window, action)
+  window: (action) => ipcRenderer.send(Channels.window, action),
+  getMicrophoneSnapshot: () => ipcRenderer.invoke(Channels.microphoneSnapshot),
+  onMicrophoneState: (listener) => subscribe(Channels.microphoneState, listener),
+  onPitch: (listener) => subscribe(Channels.pitch, listener),
+  setMicrophoneOptions: (options) => ipcRenderer.send(Channels.microphoneOptions, options),
+  reportMicrophone: (report) => ipcRenderer.send(Channels.microphoneReport, report),
+  reportPitch: (captureId, frame) => ipcRenderer.send(Channels.reportPitch, captureId, frame)
 }
 
 contextBridge.exposeInMainWorld("floatfall", api)

@@ -1,4 +1,5 @@
 import type { Note, Playback, Video } from "@floatfall/protocol"
+import type { MicrophoneOptions, MicrophoneReport, MicrophoneSnapshot, MicrophoneState, PitchFrame } from "./microphone"
 
 export type Stage =
   | "idle"
@@ -64,7 +65,13 @@ export const Channels = {
   seek: "floatfall:seek",
   openSettings: "floatfall:open-settings",
   openCache: "floatfall:open-cache",
-  window: "floatfall:window"
+  window: "floatfall:window",
+  microphoneSnapshot: "floatfall:microphone-snapshot",
+  microphoneState: "floatfall:microphone-state",
+  microphoneOptions: "floatfall:microphone-options",
+  microphoneReport: "floatfall:microphone-report",
+  pitch: "floatfall:pitch",
+  reportPitch: "floatfall:report-pitch"
 } as const
 
 export interface FloatfallApi {
@@ -79,6 +86,12 @@ export interface FloatfallApi {
   openSettings(): void
   openCache(): void
   window(action: WindowAction): void
+  getMicrophoneSnapshot(): Promise<MicrophoneSnapshot>
+  onMicrophoneState(listener: (state: MicrophoneState) => void): () => void
+  onPitch(listener: (pitch: PitchFrame | null) => void): () => void
+  setMicrophoneOptions(options: MicrophoneOptions): void
+  reportMicrophone(report: MicrophoneReport): void
+  reportPitch(captureId: number, frame: PitchFrame | null): void
 }
 
 export const initialUiState: UiState = {

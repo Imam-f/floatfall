@@ -1,6 +1,8 @@
 import type { Note } from "@floatfall/protocol"
 import { memo, type PointerEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { currentTime, isPlaying, seek, subscribePlayback } from "../store"
+import { readMicrophoneState, readPitch, readPitchHistory, subscribeMicrophone, subscribePitch } from "../microphone/store"
+import { noteFromFrequency } from "../microphone/pitch"
 import {
   buildNoteIndex,
   KEYBOARD_WIDTH,
@@ -95,6 +97,43 @@ const drawFrame = (ctx: CanvasRenderingContext2D, inputs: FrameInputs, camera: C
   // playhead
   ctx.fillStyle = camera.pan === 0 ? "#ff5a5f" : "rgba(255,90,95,0.45)"
   ctx.fillRect(Math.round(xOf(time)) - 1, 0, 2, height)
+
+  const frame = readPitch()
+  const shift = readMicrophoneState().octaveUp ? 2 : 1
+  const shiftedNote = (frequency: number | null) => noteFromFrequency(frequency ? frequency * shift : null)
+  const now = Date.now()
+  // Only the microphone trail is shifted. Song notes above keep their recorded pitches.
+  ctx.save()
+  ctx.beginPath(); ctx.rect(KEYBOARD_WIDTH, 0, width - KEYBOARD_WIDTH, height); ctx.clip()
+  ctx.strokeStyle = "#67e8c4"; ctx.lineWidth = 2.5; ctx.beginPath()
+  let previous: number | null = null
+  for (const point of readPitchHistory()) {
+    const note = shiftedNote(point.frequency)
+    if (!note || now - point.at > 12000) { previous = null; continue }
+    const x = xOf(time) - (now - point.at) / 1000 * camera.pps
+    const y = (index.maxPitch - note.midi + 0.5) * rowH
+    if (previous === null || point.at - previous > 250) ctx.moveTo(x, y)
+    else ctx.lineTo(x, y)
+    previous = point.at
+  }
+  ctx.stroke(); ctx.restore()
+  const voice = frame && now - frame.at < 400 ? shiftedNote(frame.frequency) : null
+  if (voice && voice.midi >= index.minPitch - 0.5 && voice.midi <= index.maxPitch + 0.5) {
+    const y = (index.maxPitch - voice.midi + 0.5) * rowH
+    ctx.save()
+    ctx.strokeStyle = "#67e8c4"
+    ctx.lineWidth = 2
+    ctx.setLineDash([5, 4])
+    ctx.beginPath()
+    ctx.moveTo(KEYBOARD_WIDTH, y)
+    ctx.lineTo(width, y)
+    ctx.stroke()
+    ctx.fillStyle = "#67e8c4"
+    ctx.beginPath()
+    ctx.arc(px, y, 4, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.restore()
+  }
 }
 
 export const PianoRoll = memo(function PianoRoll({ notes }: { readonly notes: ReadonlyArray<Note> }) {
@@ -153,9 +192,12 @@ export const PianoRoll = memo(function PianoRoll({ notes }: { readonly notes: Re
       if (isPlaying()) camera.current.pan = 0
       dirty.current = true
     })
+    const unsubscribePitch = subscribePitch(() => { dirty.current = true })
+    const unsubscribeMicrophone = subscribeMicrophone(() => { dirty.current = true })
     let raf = 0
     const loop = () => {
       raf = requestAnimationFrame(loop)
+      if (document.hidden) return
       if (!dirty.current && !isPlaying()) return
       dirty.current = false
       drawFrame(ctx, inputs.current, camera.current, currentTime())
@@ -164,6 +206,8 @@ export const PianoRoll = memo(function PianoRoll({ notes }: { readonly notes: Re
     return () => {
       cancelAnimationFrame(raf)
       unsubscribe()
+      unsubscribePitch()
+      unsubscribeMicrophone()
     }
   }, [])
 

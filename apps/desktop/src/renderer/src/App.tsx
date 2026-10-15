@@ -3,6 +3,8 @@ import type { UiState } from "../../shared/ipc"
 import { PianoRoll } from "./pianoRoll/PianoRoll"
 import { useNotes, useUiState } from "./store"
 import { TitleBar } from "./TitleBar"
+import { MicrophoneOverlay, MicrophonePanel } from "./microphone/MicrophonePanel"
+import { useMicrophone } from "./microphone/useMicrophone"
 
 const emptyMessage = (state: UiState): string | null => {
   if (!state.extensionConnected && !state.video) {
@@ -29,6 +31,7 @@ const Overlay = memo(function Overlay({ message, error }: { readonly message: st
 })
 
 export const App = () => {
+  useMicrophone()
   const state = useUiState()
   const { notes, videoId } = useNotes()
   const visibleNotes = videoId === state.video?.videoId ? notes : EMPTY
@@ -40,9 +43,12 @@ export const App = () => {
       <main className="stage-area">
         <PianoRoll notes={visibleNotes} />
         {message && <Overlay message={message} error={state.job.stage === "error"} />}
+        <MicrophoneOverlay />
       </main>
     </div>
   )
 }
+
+export const MicrophoneApp = () => <div className="microphone-app"><MicrophonePanel floating /></div>
 
 const EMPTY: ReadonlyArray<never> = []

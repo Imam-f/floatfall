@@ -19,6 +19,7 @@
     "@floatfall/protocol": "*",
     "@tonejs/midi": "^2.0.28",
     "effect": "^4.0.5",
+    "pitchy": "^4.1.0",
     "ws": "^8.22.0"
   },
   "devDependencies": {

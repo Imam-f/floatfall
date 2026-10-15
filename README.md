@@ -35,6 +35,18 @@ Only videos of 7 minutes or less are detected (`MAX_VIDEO_SECONDS` in `packages/
 
 The extension connects to `ws://127.0.0.1:47615`. The green dot in the window title bar shows that it is connected.
 
+## Live singing note
+
+Click the **microphone button** in the title bar to show your live singing note over the piano roll. The display shows the note and octave, frequency, tuning offset in cents, and microphone level. A green horizontal guide marks your pitch on the piano roll when it is within the displayed range.
+
+Use **Pop out ↗** to move the display to its own draggable, resizable window that stays on top, or **Dock ↙** to put it back over the roll. The floating display keeps working when the main window is minimized. You can select your microphone from the display's input menu.
+
+The **Recent pitch** graph keeps the last 12 seconds of your singing, with gaps during silence. Your recent pitch also leaves a green trail on the piano roll. Use **+1 octave** to shift only the displayed microphone note and its history up 12 semitones. The song's transcribed notes stay at their original pitches. Docking and popping out keep the same history and octave setting.
+
+The microphone starts only when you turn it on. Turn it off with the title-bar button or the display's **×** button; closing the floating window also releases the microphone. Microphone audio is analyzed locally, without recording, uploading, or playing it through your speakers. It starts off again when the app is relaunched or reloaded. For the clearest reading, use headphones while a YouTube video is playing.
+
+Pitch tracking uses [Pitchy's McLeod method](https://github.com/ianprime0509/pitchy), a 4096-sample analysis window, noise/clarity gates, and a short median filter. It follows one singing voice at a time, with A4 = 440 Hz as the tuning reference. This runs independently of the YouTube transcription models and needs no GPU.
+
 ## Plugging in models
 
 Click the settings icon in the title bar to open `settings.json`. It lives in Electron's `userData` folder. The app reloads the file when you save it.

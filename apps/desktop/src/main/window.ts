@@ -6,25 +6,28 @@ import { AppState } from "./services/AppState"
 import { Bridge } from "./services/Bridge"
 import { Controller } from "./services/Controller"
 import { Settings } from "./services/Settings"
+import { attachMicrophone } from "./microphone"
 
-const createWindow = () => {
+const createWindow = (microphone = false) => {
   const win = new BrowserWindow({
-    width: 560,
-    height: 280,
-    minWidth: 320,
-    minHeight: 160,
+    width: microphone ? 300 : 560,
+    height: 380,
+    minWidth: microphone ? 260 : 320,
+    minHeight: microphone ? 340 : 220,
     frame: false,
     alwaysOnTop: true,
     fullscreenable: false,
     maximizable: false,
     backgroundColor: "#0e1014",
-    title: "floatfall",
+    title: microphone ? "floatfall · Singing note" : "floatfall",
     show: false,
     webPreferences: {
       preload: join(__dirname, "../preload/index.js"),
       contextIsolation: true,
       sandbox: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      // The main renderer owns capture even when only the detached tuner is visible.
+      backgroundThrottling: false
     }
   })
   // "floating" keeps it above normal windows (and above fullscreen-ish players on macOS).
@@ -33,8 +36,10 @@ const createWindow = () => {
   win.once("ready-to-show", () => win.showInactive())
 
   const devUrl = process.env["ELECTRON_RENDERER_URL"]
-  if (devUrl) void win.loadURL(devUrl)
-  else void win.loadFile(join(__dirname, "../renderer/index.html"))
+  win.webContents.setWindowOpenHandler(() => ({ action: "deny" }))
+  win.webContents.on("will-navigate", (event) => event.preventDefault())
+  if (devUrl) void win.loadURL(microphone ? `${devUrl}#microphone` : devUrl)
+  else void win.loadFile(join(__dirname, "../renderer/index.html"), microphone ? { hash: "microphone" } : {})
   return win
 }
 
@@ -53,8 +58,13 @@ export const WindowLayer = Layer.effectDiscard(
     const fork = Effect.runForkWith(context)
 
     const win = yield* Effect.acquireRelease(
-      Effect.sync(createWindow),
+      Effect.sync(() => createWindow()),
       (w) => Effect.sync(() => !w.isDestroyed() && w.destroy())
+    )
+
+    yield* Effect.acquireRelease(
+      Effect.sync(() => attachMicrophone(win, () => createWindow(true))),
+      (dispose) => Effect.sync(dispose)
     )
 
     const send = (channel: string, payload: unknown) =>

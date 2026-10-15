@@ -1,6 +1,7 @@
 import { memo, type ReactNode } from "react"
 import type { JobStatus, UiState } from "../../shared/ipc"
 import { api } from "./store"
+import { MicrophoneToggle } from "./microphone/MicrophonePanel"
 
 const STAGE_LABEL: Record<JobStatus["stage"], string> = {
   idle: "Idle",
@@ -100,6 +101,7 @@ export const TitleBar = memo(function TitleBar({ state }: { readonly state: UiSt
       )}
       <div className="spacer" />
       <div className="controls">
+        <MicrophoneToggle />
         <Toggle
           label="Clean vocals"
           title={state.separatorConfigured
