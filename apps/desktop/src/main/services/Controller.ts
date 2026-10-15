@@ -1,5 +1,5 @@
 import type { Video } from "@floatfall/protocol"
-import { Context, Effect, FiberHandle, Layer, Queue, Stream, SubscriptionRef } from "effect"
+import { Context, Effect, Fiber, Layer, Queue, Stream, SubscriptionRef } from "effect"
 import type { UiOptions } from "../../shared/ipc"
 import { AppState } from "./AppState"
 import { Pipeline } from "./Pipeline"
@@ -12,8 +12,8 @@ type Command =
 
 /**
  * Decides *when* to run the pipeline. UI/IPC handlers only enqueue a command;
- * a single fiber processes commands in order and owns the running job, so a
- * new video (or toggling "clean vocals") interrupts the previous job.
+ * a single fiber processes commands in order. Jobs continue independently so
+ * switching videos does not interrupt an in-progress transcription.
  */
 export class Controller extends Context.Service<Controller, {
   readonly transcribeNow: Effect.Effect<void>
@@ -27,7 +27,6 @@ export class Controller extends Context.Service<Controller, {
       const pipeline = yield* Pipeline
       const settings = yield* Settings
       const commands = yield* Queue.unbounded<Command>()
-      const job = yield* FiberHandle.make<void, never>()
 
       // Mirror persisted options into UI state.
       yield* settings.changes.pipe(
@@ -58,8 +57,8 @@ export class Controller extends Context.Service<Controller, {
         Effect.forkScoped
       )
 
-      /** The job currently owned by `job` (null when nothing is running). */
-      let running: { readonly id: string; readonly videoId: string } | null = null
+      /** Active jobs keyed by their settings-sensitive cache key. */
+      const running = new Map<string, { fiber?: Fiber.Fiber<void, never> }>()
 
       const start = (video: Video) =>
         Effect.gen(function*() {
@@ -75,7 +74,13 @@ export class Controller extends Context.Service<Controller, {
             )
             return
           }
-          if (running?.id === key.id) return // already running this exact job
+          if (running.has(key.id)) {
+            yield* appState.update((s) => ({
+              ...s,
+              job: { key: key.id, stage: "queued", progress: null, message: null }
+            }))
+            return // already running this exact job
+          }
           if (current.videoId !== video.videoId) {
             yield* appState.setNotes({ key: null, videoId: video.videoId, notes: [] })
           }
@@ -83,37 +88,40 @@ export class Controller extends Context.Service<Controller, {
             ...s,
             job: { key: key.id, stage: "queued", progress: null, message: null }
           }))
-          const self = { id: key.id, videoId: key.videoId }
-          running = self
-          yield* pipeline.transcribe(key).pipe(
+          const self: { fiber?: Fiber.Fiber<void, never> } = {}
+          running.set(key.id, self)
+          const work = pipeline.transcribe(key).pipe(
             Effect.flatMap((result) =>
-              appState.setNotes(result).pipe(
-                Effect.andThen(
-                  appState.setJob(key.id, {
-                    stage: "done",
-                    progress: 1,
-                    message: `${result.notes.length} notes`
-                  })
-                )
-              )
+              Effect.gen(function*() {
+                const state = yield* SubscriptionRef.get(appState.state)
+                if (state.video?.videoId !== result.videoId || state.job.key !== key.id) return
+                yield* appState.setNotes(result)
+                yield* appState.setJob(key.id, {
+                  stage: "done",
+                  progress: 1,
+                  message: `${result.notes.length} notes`
+                })
+              })
             ),
             Effect.catch((error) =>
               Effect.logWarning("Pipeline failed", error).pipe(
                 Effect.andThen(appState.setJob(key.id, { stage: "error", progress: null, message: error.message }))
               )
-            ),
+            )
+          )
+          self.fiber = yield* work.pipe(
             Effect.ensuring(Effect.sync(() => {
-              if (running === self) running = null
+              if (running.get(key.id) === self) running.delete(key.id)
             })),
-            FiberHandle.run(job)
+            Effect.forkScoped
           )
         })
 
       const stop = (message: string | null) =>
-        FiberHandle.clear(job).pipe(
-          Effect.andThen(Effect.sync(() => {
-            running = null
-          })),
+        Effect.forEach([...running.values()], (entry) =>
+          entry.fiber ? Fiber.interrupt(entry.fiber) : Effect.void
+        ).pipe(
+          Effect.andThen(Effect.sync(() => running.clear())),
           Effect.andThen(
             appState.update((s) =>
               s.job.stage === "done" || s.job.stage === "idle"
@@ -133,10 +141,7 @@ export class Controller extends Context.Service<Controller, {
           case "Auto": {
             if (!state.video) return
             if (!state.options.autoTranscribe || !state.transcriberConfigured) {
-              // Never auto-start, but make sure a job for another video is not left running.
-              if (running !== null && running.videoId !== state.video.videoId) {
-                yield* stop(null)
-              }
+              // Existing jobs continue; this only prevents starting another one.
               return
             }
             return yield* start(state.video)

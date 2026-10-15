@@ -40,7 +40,7 @@ export class Tools extends Context.Service<Tools, {
         yield* Effect.logDebug(`[${options.tool}] ${options.command} ${options.args.join(" ")}`)
 
         // The handle lives in this scope: if the fiber is interrupted (user
-        // switched tab, cancelled, app quit) the process is killed.
+        // cancels, app quits) the process is killed.
         const exitCode = yield* Effect.scoped(
           Effect.gen(function*() {
             const handle = yield* spawner.spawn(
