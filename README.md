@@ -2,6 +2,8 @@
 
 # floatfall
 
+Licensed under the [MIT License](LICENSE). Third-party dependencies and model weights retain their respective licenses.
+
 A Chrome extension and an Electron app that work together. The extension finds the YouTube video you are watching. The desktop app then:
 
 1. downloads a low-quality copy with `yt-dlp`,
@@ -10,7 +12,7 @@ A Chrome extension and an Electron app that work together. The extension finds t
 4. transcribes the melody with **your** transcription command,
 5. shows the notes as a piano roll in a small frameless window that stays on top of other windows. The roll follows the YouTube playhead. Click the roll to seek the video.
 
-Model wrappers are included for BS-RoFormer vocal isolation and MuScriptor melody transcription. Configure their commands in `settings.json` as shown below.
+Model wrappers are included for BS-RoFormer vocal isolation and MuScriptor melody transcription. Choose and download them from the desktop app’s **Settings → Models** menu, or configure custom commands as shown below.
 
 ```
 apps/extension   Chrome MV3 extension (Effect background worker, tiny content script, React popup)
@@ -49,10 +51,19 @@ Pitch tracking uses [Pitchy's McLeod method](https://github.com/ianprime0509/pit
 
 ## Plugging in models
 
-Click the settings icon in the title bar to open `settings.json`. It lives in Electron's `userData` folder. The app reloads the file when you save it.
+Click the settings icon in the title bar to open the settings window:
+
+- **Models:** choose MuScriptor small, medium, or large and an NVIDIA CUDA or CPU device. Open the selected model’s Hugging Face page to accept its license/access conditions, then download its weights. If needed, paste a read token from the same account; Hugging Face stores it in its local credential cache, never in `settings.json`. Existing `hf auth login` credentials and `HF_TOKEN` are also supported. Select BS-RoFormer to configure and download optional vocal isolation (requires an NVIDIA GPU for processing).
+- **Processing:** choose local processing or a remote worker, configure shared tokens, enable the worker server, and control automatic transcription. Models on this computer apply to local jobs and jobs it serves; a remote worker uses its own models.
+- **Advanced:** set paths for `uv`, `yt-dlp`, and FFmpeg, set the audio cache, or edit custom separator/transcriber commands. Included model scripts require [uv](https://docs.astral.sh/uv/getting-started/installation/); the first download installs their pinned Python dependencies and can take several minutes and several GB of disk space.
+
+Click **Save changes** (or Ctrl/Cmd+S) to apply configuration to new jobs. **Download / verify weights** immediately prepares the selected model independently of saving; downloads show progress and errors, can be cancelled/retried, and keep running if the settings window closes. Cached files are reused on later downloads and model runs. A successful download verifies the weights, not GPU compatibility.
+
+For manual configuration, **Advanced → Open settings.json** opens the file in Electron’s `userData` folder. Valid manual edits reload automatically; if you have unsaved edits in the settings window, reload them before saving to avoid overwriting external changes.
 
 ```jsonc
 {
+  "uvPath": "uv",              // executable used by included model presets and downloads
   "ytDlpPath": "yt-dlp",
   "ffmpegPath": "ffmpeg",
   "downloadFormat": "worst[acodec!=none]/worstaudio/worst", // yt-dlp -f selector
@@ -141,7 +152,7 @@ To test the plumbing without a real model, use the stubs in `examples/`:
 
 ## Processing on another instance
 
-Every desktop instance can process its own videos, serve as a worker for other instances, or do both. Set these options in each machine's `settings.json` using the title-bar settings button. Changes apply when the file is saved.
+Every desktop instance can process its own videos, serve as a worker for other instances, or do both. Configure this in **Settings → Processing**, or set these options in each machine’s `settings.json` through **Settings → Advanced**. Changes apply when saved.
 
 On the machine with your models/GPU, keep your separator and transcriber commands configured and add:
 

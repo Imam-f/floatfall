@@ -9,6 +9,7 @@ const DEFAULT_REMOTE_URL = `ws://192.168.2.6:${WORKER_PORT}`
  */
 export class AppPaths extends Context.Service<AppPaths, {
   readonly userData: string
+  readonly modelScripts: string
 }>()("floatfall/main/AppPaths") {}
 
 /**
@@ -46,6 +47,7 @@ const WorkerSettings = Schema.Struct({
 })
 
 export const SettingsSchema = Schema.Struct({
+  uvPath: Schema.String.pipe(Schema.withDecodingDefaultKey(Effect.succeed("uv"))),
   ytDlpPath: Schema.String.pipe(Schema.withDecodingDefaultKey(Effect.succeed("yt-dlp"))),
   ffmpegPath: Schema.String.pipe(Schema.withDecodingDefaultKey(Effect.succeed("ffmpeg"))),
   /** yt-dlp `-f` selector. Defaults to the smallest file that still has audio. */
@@ -73,11 +75,16 @@ const decodeSettings = Schema.decodeUnknownEffect(SettingsJson)
 const encodeSettings = Schema.encodeSync(SettingsSchema)
 const defaults = Schema.decodeUnknownSync(SettingsSchema)({})
 
+export class SettingsWriteError extends Schema.TaggedError<SettingsWriteError>()("SettingsWriteError", {
+  message: Schema.String
+}) {}
+
 export class Settings extends Context.Service<Settings, {
   readonly file: string
   readonly cacheDir: Effect.Effect<string>
   readonly get: Effect.Effect<SettingsData>
   readonly changes: Stream.Stream<SettingsData>
+  save(settings: SettingsData): Effect.Effect<void, SettingsWriteError>
   update(f: (settings: SettingsData) => SettingsData): Effect.Effect<void>
 }>()("floatfall/main/Settings") {
   static readonly layer = Layer.effect(
@@ -91,7 +98,7 @@ export class Settings extends Context.Service<Settings, {
       const write = (settings: SettingsData) =>
         fs.makeDirectory(userData, { recursive: true }).pipe(
           Effect.andThen(fs.writeFileString(file, JSON.stringify(encodeSettings(settings), null, 2) + "\n")),
-          Effect.catch((error) => Effect.logError("Failed to write settings", error))
+          Effect.mapError((error) => new SettingsWriteError({ message: `Could not save settings: ${error.message}` }))
         )
 
       const read = fs.readFileString(file).pipe(
@@ -101,7 +108,7 @@ export class Settings extends Context.Service<Settings, {
       )
 
       if (!(yield* fs.exists(file).pipe(Effect.orElseSucceed(() => false)))) {
-        yield* write(defaults)
+        yield* write(defaults).pipe(Effect.catch((error) => Effect.logError(error.message)))
       }
       const initial = yield* read
       const ref = yield* SubscriptionRef.make(initial._tag === "Some" ? initial.value : defaults)
@@ -112,7 +119,10 @@ export class Settings extends Context.Service<Settings, {
         Stream.filter((event) => path.basename(event.path) === "settings.json"),
         Stream.debounce("200 millis"),
         Stream.runForEach(() =>
-          read.pipe(Effect.flatMap((next) => next._tag === "Some" ? SubscriptionRef.set(ref, next.value) : Effect.void))
+          read.pipe(Effect.flatMap((next) => next._tag === "Some"
+            ? SubscriptionRef.get(ref).pipe(Effect.flatMap((previous) => JSON.stringify(previous) === JSON.stringify(next.value)
+              ? Effect.void : SubscriptionRef.set(ref, next.value)))
+            : Effect.void))
         ),
         Effect.catch((error) => Effect.logWarning("Settings watcher stopped", error)),
         Effect.forkScoped
@@ -125,8 +135,12 @@ export class Settings extends Context.Service<Settings, {
         get,
         cacheDir: get.pipe(Effect.map((s) => s.cacheDir.trim() || path.join(userData, "cache"))),
         changes: SubscriptionRef.changes(ref),
+        save: (settings) => SubscriptionRef.updateEffect(ref, () => write(settings).pipe(Effect.as(settings))),
         update: (f) =>
-          SubscriptionRef.updateAndGet(ref, f).pipe(Effect.flatMap(write))
+          SubscriptionRef.updateEffect(ref, (previous) => {
+            const next = f(previous)
+            return write(next).pipe(Effect.as(next))
+          }).pipe(Effect.catch((error) => Effect.logError(error.message)))
       })
     })
   )

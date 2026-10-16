@@ -69,8 +69,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Transcribe the melody of an audio file with MuScriptor.",
     )
-    parser.add_argument("input", type=Path, help="input audio (wav/flac/mp3/...)")
-    parser.add_argument("output", type=Path, help="output notes JSON")
+    parser.add_argument("input", type=Path, nargs="?", help="input audio (wav/flac/mp3/...)")
+    parser.add_argument("output", type=Path, nargs="?", help="output notes JSON")
+    parser.add_argument("--download-only", action="store_true", help="download weights and config without loading the model or using a GPU")
     parser.add_argument(
         "--model",
         default=os.environ.get("FLOATFALL_MUSCRIPTOR_MODEL", "large"),
@@ -100,7 +101,29 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--list-instruments", action="store_true", help="print instrument groups and exit"
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if not args.download_only and not args.list_instruments and (args.input is None or args.output is None):
+        parser.error("input and output are required unless --download-only or --list-instruments is set")
+    return args
+
+
+def download_model(size: str) -> None:
+    if size not in ("small", "medium", "large"):
+        raise ValueError("download-only supports small, medium, or large")
+    from huggingface_hub import hf_hub_download, login
+
+    # Passed through the child environment, never the command line. Save with
+    # Hugging Face so later transcription processes can use the same account.
+    token = os.environ.get("FLOATFALL_HF_TOKEN")
+    if token:
+        log("authenticating with Hugging Face; the token will be stored in its local credential cache")
+        login(token=token, add_to_git_credential=False)
+    repo = f"MuScriptor/muscriptor-{size}"
+    log(f"downloading {repo} config")
+    hf_hub_download(repo_id=repo, filename="config.json", token=token)
+    log(f"downloading {repo} weights (cached files are reused)")
+    hf_hub_download(repo_id=repo, filename="model.safetensors", token=token)
+    log("model download complete")
 
 
 def is_auth_error(error: BaseException) -> bool:
@@ -202,6 +225,18 @@ def transcribe(args: argparse.Namespace) -> list[Note]:
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
 
+    if args.download_only:
+        try:
+            download_model(args.model)
+            progress(1.0)
+            return 0
+        except Exception as error:
+            if is_auth_error(error):
+                log(f"[auth-required] accept the licence at https://huggingface.co/MuScriptor/muscriptor-{args.model} and authenticate with a read token from the same account")
+                return EXIT_AUTH
+            log(f"download failed: {type(error).__name__}: {error}")
+            return EXIT_FAILED
+
     if args.list_instruments:
         from muscriptor.tokenizer.mt3 import MT3_FULL_PLUS_GROUP_NAMES
 
@@ -218,7 +253,7 @@ def main(argv: list[str]) -> int:
         if is_auth_error(error):
             log(
                 "cannot download MuScriptor weights: accept the licence at "
-                "https://huggingface.co/MuScriptor/muscriptor-large and run "
+                f"https://huggingface.co/MuScriptor/muscriptor-{args.model} and run "
                 "`uvx hf auth login` (or set HF_TOKEN)"
             )
             return EXIT_AUTH

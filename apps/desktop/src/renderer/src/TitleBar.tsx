@@ -114,7 +114,7 @@ export const TitleBar = memo(function TitleBar({ state }: { readonly state: UiSt
           label="Clean vocals"
           title={state.separatorConfigured
             ? "Run vocal separation before transcription"
-            : "Vocal separator not configured yet (settings.json → separator.command)"}
+            : "Choose a vocal separator in Settings → Models"}
           checked={options.cleanVocals}
           warn={options.cleanVocals && !state.separatorConfigured}
           onChange={setCleanVocals}
@@ -140,7 +140,7 @@ export const TitleBar = memo(function TitleBar({ state }: { readonly state: UiSt
               {job.stage === "error" ? <Icon d="M13 8a5 5 0 1 1-1.5-3.5M13 2v3h-3" /> : <Icon d="M5 3l8 5-8 5z" />}
             </IconButton>
           )}
-        <IconButton title="Open settings.json" onClick={openSettings}>
+        <IconButton title="Settings" onClick={openSettings}>
           <Icon d="M2 4h8M12 4h2M2 12h2M6 12h8M10 2v4M4 10v4" />
         </IconButton>
         <IconButton title="Open cache folder" onClick={openCache}>

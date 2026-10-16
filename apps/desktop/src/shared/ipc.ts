@@ -1,6 +1,7 @@
 import type { Note, Playback, Video } from "@floatfall/protocol"
 import type { MicrophoneOptions, MicrophoneReport, MicrophoneSnapshot, MicrophoneState, PitchFrame } from "./microphone"
 import type { CacheAvailability } from "./worker"
+import type { ModelDownloadRequest, ModelDownloads, ModelId, SaveSettingsRequest, SettingsLink, SettingsResult, SettingsSnapshot } from "./settings"
 
 export type Stage =
   | "idle"
@@ -71,6 +72,14 @@ export const Channels = {
   cancel: "floatfall:cancel",
   seek: "floatfall:seek",
   openSettings: "floatfall:open-settings",
+  settingsSnapshot: "floatfall:settings-snapshot",
+  saveSettings: "floatfall:save-settings",
+  settingsChanged: "floatfall:settings-changed",
+  openSettingsFile: "floatfall:open-settings-file",
+  settingsLink: "floatfall:settings-link",
+  downloadModel: "floatfall:download-model",
+  cancelModelDownload: "floatfall:cancel-model-download",
+  modelDownloads: "floatfall:model-downloads",
   openCache: "floatfall:open-cache",
   window: "floatfall:window",
   microphoneSnapshot: "floatfall:microphone-snapshot",
@@ -91,6 +100,14 @@ export interface FloatfallApi {
   cancel(): void
   seek(time: number): void
   openSettings(): void
+  getSettings(): Promise<SettingsSnapshot>
+  saveSettings(request: SaveSettingsRequest): Promise<SettingsResult>
+  onSettingsChanged(listener: () => void): () => void
+  openSettingsFile(): Promise<SettingsResult>
+  openSettingsLink(link: SettingsLink): Promise<SettingsResult>
+  downloadModel(request: ModelDownloadRequest): Promise<SettingsResult>
+  cancelModelDownload(model: ModelId): Promise<SettingsResult>
+  onModelDownloads(listener: (downloads: ModelDownloads) => void): () => void
   openCache(): void
   window(action: WindowAction): void
   getMicrophoneSnapshot(): Promise<MicrophoneSnapshot>

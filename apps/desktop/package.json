@@ -3,6 +3,7 @@
   "productName": "floatfall",
   "private": true,
   "version": "0.1.0",
+  "license": "MIT",
   "description": "Floating piano-roll transcriber for YouTube tabs",
   "main": "./out/main/index.js",
   "scripts": {

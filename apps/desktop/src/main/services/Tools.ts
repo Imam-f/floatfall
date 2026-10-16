@@ -13,6 +13,7 @@ export interface RunOptions {
   readonly command: string
   readonly args: ReadonlyArray<string>
   readonly cwd?: string | undefined
+  readonly env?: Record<string, string | undefined> | undefined
   /** Called for each stdout/stderr line. Must be cheap. */
   readonly onLine?: ((line: string) => Effect.Effect<void>) | undefined
 }
@@ -46,6 +47,8 @@ export class Tools extends Context.Service<Tools, {
             const handle = yield* spawner.spawn(
               ChildProcess.make(options.command, options.args, {
                 cwd: options.cwd,
+                env: options.env,
+                extendEnv: true,
                 windowsHide: true,
                 forceKillAfter: "3 seconds"
               })

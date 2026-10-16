@@ -1,5 +1,5 @@
 import { join } from "node:path"
-import { app, BrowserWindow, ipcMain, type IpcMainEvent, shell } from "electron"
+import { app, BrowserWindow, ipcMain, type IpcMainEvent, type IpcMainInvokeEvent, shell } from "electron"
 import { Effect, Layer, Stream, SubscriptionRef } from "effect"
 import { Channels, type Snapshot, type UiOptions, type WindowAction } from "../shared/ipc"
 import { AppState } from "./services/AppState"
@@ -7,19 +7,23 @@ import { Bridge } from "./services/Bridge"
 import { Controller } from "./services/Controller"
 import { Settings } from "./services/Settings"
 import { attachMicrophone } from "./microphone"
+import { ModelSetup } from "./services/ModelSetup"
+import type { ModelDownloadRequest, ModelId, SaveSettingsRequest, SettingsLink, SettingsResult } from "../shared/settings"
 
-const createWindow = (microphone = false) => {
+const createWindow = (mode: "main" | "microphone" | "settings" = "main") => {
+  const microphone = mode === "microphone"
+  const settings = mode === "settings"
   const win = new BrowserWindow({
-    width: microphone ? 300 : 560,
-    height: 380,
-    minWidth: microphone ? 260 : 320,
-    minHeight: microphone ? 340 : 220,
+    width: settings ? 700 : microphone ? 300 : 560,
+    height: settings ? 740 : 380,
+    minWidth: settings ? 360 : microphone ? 260 : 320,
+    minHeight: settings ? 420 : microphone ? 340 : 220,
     frame: false,
     alwaysOnTop: true,
     fullscreenable: false,
-    maximizable: false,
+    maximizable: settings,
     backgroundColor: "#0e1014",
-    title: microphone ? "floatfall · Singing note" : "floatfall",
+    title: settings ? "floatfall · Settings" : microphone ? "floatfall · Singing note" : "floatfall",
     show: false,
     webPreferences: {
       preload: join(__dirname, "../preload/index.js"),
@@ -38,8 +42,8 @@ const createWindow = (microphone = false) => {
   const devUrl = process.env["ELECTRON_RENDERER_URL"]
   win.webContents.setWindowOpenHandler(() => ({ action: "deny" }))
   win.webContents.on("will-navigate", (event) => event.preventDefault())
-  if (devUrl) void win.loadURL(microphone ? `${devUrl}#microphone` : devUrl)
-  else void win.loadFile(join(__dirname, "../renderer/index.html"), microphone ? { hash: "microphone" } : {})
+  if (devUrl) void win.loadURL(mode === "main" ? devUrl : `${devUrl}#${mode}`)
+  else void win.loadFile(join(__dirname, "../renderer/index.html"), mode === "main" ? {} : { hash: mode })
   return win
 }
 
@@ -54,6 +58,7 @@ export const WindowLayer = Layer.effectDiscard(
     const controller = yield* Controller
     const bridge = yield* Bridge
     const settings = yield* Settings
+    const models = yield* ModelSetup
     const context = yield* Effect.context<never>()
     const fork = Effect.runForkWith(context)
 
@@ -63,9 +68,27 @@ export const WindowLayer = Layer.effectDiscard(
     )
 
     yield* Effect.acquireRelease(
-      Effect.sync(() => attachMicrophone(win, () => createWindow(true))),
+      Effect.sync(() => attachMicrophone(win, () => createWindow("microphone"))),
       (dispose) => Effect.sync(dispose)
     )
+
+    let settingsWin: BrowserWindow | null = null
+    const openSettings = () => {
+      if (settingsWin && !settingsWin.isDestroyed()) {
+        if (settingsWin.isMinimized()) settingsWin.restore()
+        settingsWin.show()
+        settingsWin.focus()
+        return
+      }
+      settingsWin = createWindow("settings")
+      settingsWin.once("closed", () => { settingsWin = null })
+    }
+    yield* Effect.addFinalizer(() => Effect.sync(() => { settingsWin?.destroy(); settingsWin = null }))
+    const sendSettings = (channel: string, payload?: unknown) => Effect.sync(() => {
+      if (settingsWin && !settingsWin.isDestroyed()) settingsWin.webContents.send(channel, payload)
+    })
+    yield* models.downloads.pipe(Stream.runForEach((value) => sendSettings(Channels.modelDownloads, value)), Effect.forkScoped)
+    yield* settings.changes.pipe(Stream.runForEach(() => sendSettings(Channels.settingsChanged)), Effect.forkScoped)
 
     const send = (channel: string, payload: unknown) =>
       Effect.sync(() => {
@@ -93,10 +116,13 @@ export const WindowLayer = Layer.effectDiscard(
       } satisfies Snapshot
     })
 
-    const onWindow = (_: IpcMainEvent, action: WindowAction) => {
-      if (action === "close") win.close()
-      else if (action === "minimize") win.minimize()
+    const onWindow = (event: IpcMainEvent, action: WindowAction) => {
+      const target = event.sender === settingsWin?.webContents ? settingsWin : event.sender === win.webContents ? win : null
+      if (!target) return
+      if (action === "close") target.close()
+      else if (action === "minimize") target.minimize()
       else {
+        if (target !== win || action !== "togglePin") return
         const pinned = !win.isAlwaysOnTop()
         win.setAlwaysOnTop(pinned, "floating")
         fork(appState.update((s) => ({ ...s, options: { ...s.options, pinned } })))
@@ -112,20 +138,55 @@ export const WindowLayer = Layer.effectDiscard(
             Effect.flatMap((s) => (s.video ? bridge.seek(s.video.videoId, time) : Effect.void))
           )
         ),
-      [Channels.openSettings]: () => void shell.openPath(settings.file),
+      [Channels.openSettings]: openSettings,
       [Channels.openCache]: () =>
         fork(settings.cacheDir.pipe(Effect.flatMap((dir) => Effect.promise(() => shell.openPath(dir))))),
       [Channels.window]: onWindow
     }
 
+    const result = (effect: Effect.Effect<void, unknown>) => Effect.runPromiseWith(context)(effect.pipe(
+      Effect.as({ ok: true } as SettingsResult),
+      Effect.catch((error) => {
+        const cause = error instanceof Error && error.cause instanceof Error ? error.cause : error
+        return Effect.succeed({ ok: false, error: cause instanceof Error ? cause.message : String(cause) } as SettingsResult)
+      })
+    ))
+    const links: Record<SettingsLink, string> = {
+      small: "https://huggingface.co/MuScriptor/muscriptor-small",
+      medium: "https://huggingface.co/MuScriptor/muscriptor-medium",
+      large: "https://huggingface.co/MuScriptor/muscriptor-large",
+      "bs-roformer": "https://github.com/TRvlvr/model_repo/releases/tag/all_public_uvr_models",
+      "hf-tokens": "https://huggingface.co/settings/tokens",
+      uv: "https://docs.astral.sh/uv/getting-started/installation/"
+    }
+    const invokes: Record<string, (event: IpcMainInvokeEvent, ...args: any[]) => unknown> = {
+      [Channels.settingsSnapshot]: () => Effect.runPromiseWith(context)(models.snapshot),
+      [Channels.saveSettings]: (_, request: SaveSettingsRequest) => result(models.save(request)),
+      [Channels.downloadModel]: (_, request: ModelDownloadRequest) => result(models.download(request)),
+      [Channels.cancelModelDownload]: (_, id: ModelId) => result(models.cancel(id)),
+      [Channels.settingsLink]: (_, link: SettingsLink) => result(Effect.tryPromise(async () => {
+        if (!Object.hasOwn(links, link)) throw new Error("Unknown settings link.")
+        await shell.openExternal(links[link])
+      })),
+      [Channels.openSettingsFile]: () => result(Effect.tryPromise(async () => {
+        const error = await shell.openPath(settings.file)
+        if (error) throw new Error(error)
+      }))
+    }
+
     yield* Effect.acquireRelease(
       Effect.sync(() => {
         ipcMain.handle(Channels.snapshot, () => Effect.runPromiseWith(context)(snapshot))
+        for (const [channel, handler] of Object.entries(invokes)) ipcMain.handle(channel, (event, ...args) => {
+          if (event.sender !== settingsWin?.webContents && event.sender !== win.webContents) throw new Error("Unknown settings window.")
+          return handler(event, ...args)
+        })
         for (const [channel, handler] of Object.entries(handlers)) ipcMain.on(channel, handler)
       }),
       () =>
         Effect.sync(() => {
           ipcMain.removeHandler(Channels.snapshot)
+          for (const channel of Object.keys(invokes)) ipcMain.removeHandler(channel)
           for (const [channel, handler] of Object.entries(handlers)) ipcMain.removeListener(channel, handler)
         })
     )

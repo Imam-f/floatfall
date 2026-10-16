@@ -18,7 +18,7 @@ const emptyMessage = (state: UiState): string | null => {
       return "No notes were detected."
     case "idle":
       if (!state.transcriberConfigured) {
-        return "Transcriber not configured yet. Click the settings icon and set transcriber.command."
+        return "Choose a transcription model in Settings → Models."
       }
       return state.options.autoTranscribe ? null : "Press play in the title bar to transcribe this video."
     default:
