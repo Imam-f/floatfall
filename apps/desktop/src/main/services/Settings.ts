@@ -1,6 +1,8 @@
 import { Context, Effect, FileSystem, Layer, Path, Schema, Stream, SubscriptionRef } from "effect"
 import { WORKER_PORT } from "../../shared/worker"
 
+const DEFAULT_REMOTE_URL = `ws://192.168.2.6:${WORKER_PORT}`
+
 /**
  * Paths provided by Electron (`app.getPath`). Kept as a service so the Effect
  * code never touches the `electron` module directly.
@@ -33,7 +35,7 @@ export const TranscriberSpec = Schema.Struct({
 export type TranscriberSpec = typeof TranscriberSpec.Type
 
 const RemoteSettings = Schema.Struct({
-  url: Schema.String.pipe(Schema.withDecodingDefaultKey(Effect.succeed(""))),
+  url: Schema.String.pipe(Schema.withDecodingDefaultKey(Effect.succeed(DEFAULT_REMOTE_URL))),
   token: Schema.String.pipe(Schema.withDecodingDefaultKey(Effect.succeed("")))
 })
 const WorkerSettings = Schema.Struct({
@@ -55,7 +57,7 @@ export const SettingsSchema = Schema.Struct({
   cacheDir: Schema.String.pipe(Schema.withDecodingDefaultKey(Effect.succeed(""))),
   cleanVocals: Schema.Boolean.pipe(Schema.withDecodingDefaultKey(Effect.succeed(false))),
   autoTranscribe: Schema.Boolean.pipe(Schema.withDecodingDefaultKey(Effect.succeed(true))),
-  remote: RemoteSettings.pipe(Schema.withDecodingDefaultKey(Effect.succeed({ url: "", token: "" }))),
+  remote: RemoteSettings.pipe(Schema.withDecodingDefaultKey(Effect.succeed({ url: DEFAULT_REMOTE_URL, token: "" }))),
   worker: WorkerSettings.pipe(Schema.withDecodingDefaultKey(Effect.succeed({ enabled: false, host: "127.0.0.1", port: WORKER_PORT, token: "" }))),
   separator: CommandSpec.pipe(
     Schema.withDecodingDefaultKey(Effect.succeed({ command: "", args: ["{input}", "{output}"] }))

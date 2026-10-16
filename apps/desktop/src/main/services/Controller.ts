@@ -1,8 +1,9 @@
 import type { Video } from "@floatfall/protocol"
 import { Context, Effect, Fiber, Layer, Queue, Stream, SubscriptionRef } from "effect"
+import type { Scope } from "effect/Scope"
 import type { UiOptions } from "../../shared/ipc"
 import { AppState } from "./AppState"
-import { Pipeline } from "./Pipeline"
+import { Pipeline, type JobKey } from "./Pipeline"
 import { Settings } from "./Settings"
 
 type Command =
@@ -12,8 +13,9 @@ type Command =
 
 /**
  * Decides *when* to run the pipeline. UI/IPC handlers only enqueue a command;
- * a single fiber processes commands in order. Jobs continue independently so
- * switching videos does not interrupt an in-progress transcription.
+ * a single fiber processes commands in order and a FIFO queue ensures only
+ * one video is processed at a time. Switching videos does not interrupt the
+ * active job.
  */
 export class Controller extends Context.Service<Controller, {
   readonly transcribeNow: Effect.Effect<void>
@@ -58,90 +60,162 @@ export class Controller extends Context.Service<Controller, {
         Effect.forkScoped
       )
 
-      /** Active jobs keyed by their settings-sensitive cache key. */
-      const running = new Map<string, { fiber?: Fiber.Fiber<void, never> }>()
-      const preparing = new Set<{ fiber?: Fiber.Fiber<void, never> }>()
-      let generation = 0
+      type JobRequest = { readonly video: Video; readonly cleanVocals: boolean }
+      type PreparedJob = { readonly request: JobRequest; readonly key: JobKey }
+      const requestId = ({ video, cleanVocals }: JobRequest) => `${video.videoId}|${cleanVocals ? "vocals" : "mix"}`
+      const pending: Array<PreparedJob> = []
+      const queued = new Set<string>()
+      const cachedJobs = new Map<string, { readonly key: JobKey; fiber?: Fiber.Fiber<void, never> }>()
+      let active: { readonly request: JobRequest; readonly key: JobKey; fiber?: Fiber.Fiber<void, never> } | null = null
+      let runNext: () => Effect.Effect<void, never, Scope>
 
-      const start = (video: Video, requestedGeneration: number) =>
-        Effect.gen(function*() {
-          const { options } = yield* SubscriptionRef.get(appState.state)
-          const key = yield* pipeline.keyFor(video, options.cleanVocals)
-          const latest = yield* SubscriptionRef.get(appState.state)
-          if (requestedGeneration !== generation || latest.video?.videoId !== video.videoId || latest.options.cleanVocals !== options.cleanVocals) return
-          yield* appState.update((s) => ({ ...s, processing: { ...s.processing, cache: key.remote?.inspection.cache ?? null } }))
-          const current = yield* SubscriptionRef.get(appState.notes)
-          if (current.key === key.id) {
-            // Already on screen; just make sure the status reflects it.
-            yield* appState.update((s) =>
-              s.job.key === key.id
-                ? s
-                : { ...s, job: { key: key.id, stage: "done", progress: 1, message: `${current.notes.length} notes` } }
-            )
-            return
-          }
-          if (running.has(key.id)) {
-            yield* appState.update((s) => ({
-              ...s,
-              job: { key: key.id, stage: "queued", progress: null, message: null }
-            }))
-            return // already running this exact job
-          }
-          if (current.videoId !== video.videoId) {
-            yield* appState.setNotes({ key: null, videoId: video.videoId, notes: [] })
-          }
-          yield* appState.update((s) => ({
-            ...s,
-            job: { key: key.id, stage: "queued", progress: null, message: null }
-          }))
-          const self: { fiber?: Fiber.Fiber<void, never> } = {}
-          running.set(key.id, self)
-          const work = pipeline.transcribe(key).pipe(
-            Effect.flatMap((result) =>
-              Effect.gen(function*() {
-                const state = yield* SubscriptionRef.get(appState.state)
-                if (state.video?.videoId !== result.videoId || state.job.key !== key.id) return
-                yield* appState.setNotes(result)
-                yield* appState.setJob(key.id, {
-                  stage: "done",
-                  progress: 1,
-                  message: `${result.notes.length} notes`
-                })
+      const processKey = (request: JobRequest, key: JobKey) => Effect.gen(function*() {
+        const { video } = request
+        yield* appState.update((s) => ({ ...s, processing: { ...s.processing, cache: key.remote?.inspection.cache ?? null } }))
+        const current = yield* SubscriptionRef.get(appState.notes)
+        if (current.key === key.id) {
+          // Already on screen; just make sure the status reflects it.
+          yield* appState.update((s) =>
+            s.video?.videoId === video.videoId && s.job.key !== key.id
+              ? { ...s, job: { key: key.id, stage: "done", progress: 1, message: `${current.notes.length} notes` } }
+              : s
+          )
+          return
+        }
+        if (current.videoId !== video.videoId) {
+          yield* appState.setNotes({ key: null, videoId: video.videoId, notes: [] })
+        }
+        yield* appState.update((s) => s.video?.videoId === video.videoId
+          ? { ...s, job: { key: key.id, stage: "queued", progress: null, message: "Starting transcription…" } }
+          : s)
+        yield* pipeline.transcribe(key).pipe(
+          Effect.flatMap((result) =>
+            Effect.gen(function*() {
+              const state = yield* SubscriptionRef.get(appState.state)
+              if (state.video?.videoId !== result.videoId || state.job.key !== key.id) return
+              yield* appState.setNotes(result)
+              yield* appState.setJob(key.id, {
+                stage: "done",
+                progress: 1,
+                message: `${result.notes.length} notes`
               })
-            ),
-            Effect.catch((error) =>
-              Effect.logWarning("Pipeline failed", error).pipe(
-                Effect.andThen(appState.setJob(key.id, { stage: "error", progress: null, message: error.message }))
-              )
+            })
+          ),
+          Effect.catch((error) =>
+            Effect.logWarning("Pipeline failed", error).pipe(
+              Effect.andThen(appState.setJob(key.id, { stage: "error", progress: null, message: error.message }))
             )
           )
-          self.fiber = yield* work.pipe(
-            Effect.ensuring(Effect.sync(() => {
-              if (running.get(key.id) === self) running.delete(key.id)
-            })),
-            Effect.forkScoped
-          )
-        })
+        )
+      })
 
-      const launch = (video: Video) => Effect.gen(function*() {
-        const requestedGeneration = ++generation
-        const self: { fiber?: Fiber.Fiber<void, never> } = {}
-        preparing.add(self)
-        yield* appState.update((s) => ({ ...s, job: { key: null, stage: "queued", progress: null, message: "Checking processing cache…" } }))
-        self.fiber = yield* start(video, requestedGeneration).pipe(
-          Effect.catch((error) => appState.update((s) => requestedGeneration === generation
-            ? { ...s, job: { key: null, stage: "error", progress: null, message: error.message } } : s)),
-          Effect.ensuring(Effect.sync(() => preparing.delete(self))),
+      runNext = () => Effect.gen(function*() {
+        if (active !== null || pending.length === 0) return
+        const { request, key } = pending.shift()!
+        queued.delete(requestId(request))
+        const self: { readonly request: JobRequest; readonly key: JobKey; fiber?: Fiber.Fiber<void, never> } = { request, key }
+        active = self
+        self.fiber = yield* processKey(request, key).pipe(
+          Effect.ensuring(Effect.sync(() => {
+            if (active === self) active = null
+          }).pipe(Effect.andThen(runNext()))),
           Effect.forkScoped
         )
       })
 
+      const enqueue = (video: Video) => Effect.gen(function*() {
+        const state = yield* SubscriptionRef.get(appState.state)
+        const request: JobRequest = { video, cleanVocals: state.options.cleanVocals }
+        const id = requestId(request)
+        if (active !== null && requestId(active.request) === id) {
+          if (state.video?.videoId === video.videoId) {
+            yield* appState.update((s) => ({
+              ...s,
+              job: s.job.key === active?.key.id
+                ? s.job
+                : { key: active?.key.id ?? null, stage: "queued", progress: null, message: "Transcription in progress…" }
+            }))
+          }
+          return
+        }
+        const cachedJob = cachedJobs.get(id)
+        if (cachedJob) {
+          if (state.video?.videoId === video.videoId) {
+            yield* appState.update((s) => ({ ...s,
+              job: s.job.key === cachedJob.key.id ? s.job : { key: cachedJob.key.id, stage: "queued", progress: null, message: "Loading cached transcription…" }
+            }))
+          }
+          return
+        }
+        if (queued.has(id)) {
+          if (state.video?.videoId === video.videoId) {
+            yield* appState.update((s) => ({
+              ...s,
+              job: { key: null, stage: "queued", progress: null, message: "Waiting in transcription queue…" }
+            }))
+          }
+          return
+        }
+        if (state.video?.videoId === video.videoId) {
+          yield* appState.update((s) => ({
+            ...s,
+            job: { key: null, stage: "queued", progress: null, message: "Checking processing cache…" }
+          }))
+        }
+        yield* Effect.gen(function*() {
+          const key = yield* pipeline.keyFor(video, request.cleanVocals)
+          const current = yield* SubscriptionRef.get(appState.notes)
+          yield* appState.update((s) => ({ ...s, processing: { ...s.processing, cache: key.remote?.inspection.cache ?? null } }))
+          if (current.key === key.id) {
+            yield* appState.update((s) => s.video?.videoId === video.videoId
+              ? { ...s, job: { key: key.id, stage: "done", progress: 1, message: `${current.notes.length} notes` } }
+              : s)
+            return
+          }
+          const cache = key.remote?.inspection.cache ?? (yield* pipeline.cacheFor(key))
+          if (cache.notes) {
+            const self: { readonly key: JobKey; fiber?: Fiber.Fiber<void, never> } = { key }
+            cachedJobs.set(id, self)
+            self.fiber = yield* processKey(request, key).pipe(
+              Effect.ensuring(Effect.sync(() => {
+                if (cachedJobs.get(id) === self) cachedJobs.delete(id)
+              })),
+              Effect.forkScoped
+            )
+            return
+          }
+          const prepared: PreparedJob = { request, key }
+          pending.push(prepared)
+          queued.add(id)
+          if (state.video?.videoId === video.videoId) {
+            yield* appState.update((s) => ({ ...s,
+              job: { key: null, stage: "queued", progress: null, message: active ? "Waiting in transcription queue…" : "Waiting to start…" }
+            }))
+          }
+          yield* runNext()
+        }).pipe(
+          Effect.catch((error) => Effect.gen(function*() {
+            yield* Effect.logWarning("Could not prepare transcription", error)
+            yield* appState.update((s) => s.video?.videoId === video.videoId && s.job.stage === "queued"
+              ? { ...s, job: { key: null, stage: "error", progress: null, message: error.message } }
+              : s)
+          }))
+        )
+      })
+
+      const launch = (video: Video) => enqueue(video)
+
       const stop = (message: string | null) => Effect.suspend(() => {
-        generation++
-        return Effect.forEach([...preparing, ...running.values()], (entry) =>
-          entry.fiber ? Fiber.interrupt(entry.fiber) : Effect.void
-        ).pipe(
-          Effect.andThen(Effect.sync(() => { running.clear(); preparing.clear() })),
+        pending.length = 0
+        queued.clear()
+        const current = active
+        const toStop = [
+          ...(current?.fiber ? [current.fiber] : []),
+          ...[...cachedJobs.values()].flatMap((entry) => entry.fiber ? [entry.fiber] : [])
+        ]
+        return Effect.forEach(toStop, Fiber.interrupt).pipe(
+          Effect.andThen(Effect.sync(() => { if (active === current) active = null })),
+          Effect.andThen(Effect.sync(() => cachedJobs.clear())),
           Effect.andThen(
             appState.update((s) =>
               s.job.stage === "done" || s.job.stage === "idle"

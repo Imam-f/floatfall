@@ -299,10 +299,25 @@ export class Pipeline extends Context.Service<Pipeline, {
         return { key: key.id, videoId: key.videoId, notes } satisfies Transcription
       })
 
-      // In-memory memo on top of the on-disk cache: switching back to a tab is
-      // instant, concurrent requests for the same key share one run, and the
-      // run is interrupted once nobody is waiting for it anymore.
-      const cache = yield* Cache.makeWith((key: JobKey) => slot.withPermit(lookup(key)).pipe(
+      // A completed notes file is a cache hit, so it can be returned without
+      // taking the single-work semaphore used for downloads and transcription.
+      const readCachedNotes = Effect.fn("Pipeline.readCachedNotes")(function*(key: JobKey) {
+        const s = yield* configFor(key)
+        const dir = path.join(s.cacheDir, key.videoId)
+        const ext = s.transcriber.output === "midi" ? "mid" : "json"
+        const notesFile = path.join(dir, `notes.${key.cleanVocals ? "vocals" : "mix"}.${key.specHash}.${ext}`)
+        if (!(yield* exists(notesFile))) return undefined
+        return {
+          key: key.id,
+          videoId: key.videoId,
+          notes: yield* parseNotes(notesFile, s.transcriber.output)
+        } satisfies Transcription
+      })
+
+      // In-memory memo on top of the on-disk cache. Cache hits bypass the slot;
+      // only work that may need processing waits for the single-work semaphore.
+      const cache = yield* Cache.makeWith((key: JobKey) => readCachedNotes(key).pipe(
+        Effect.flatMap((cached) => cached ? Effect.succeed(cached) : slot.withPermit(lookup(key))),
         Effect.ensuring(Effect.sync(() => latestProgress.delete(key.id)))
       ), {
         capacity: 32,

@@ -158,9 +158,11 @@ Generate a token with `node -e "console.log(require('node:crypto').randomBytes(3
 
 On the machine where you watch YouTube, add the worker's LAN or VPN address:
 
+The default remote address is `ws://192.168.2.6:47616`. If an existing `settings.json` has an empty `remote.url`, set it to this address; set `remote.token` to the same token configured on the worker.
+
 ```json
 "remote": {
-  "url": "ws://192.168.1.50:47616",
+  "url": "ws://192.168.2.6:47616",
   "token": "replace-with-a-long-random-shared-secret"
 }
 ```
