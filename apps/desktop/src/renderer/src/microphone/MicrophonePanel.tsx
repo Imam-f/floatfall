@@ -55,12 +55,14 @@ const PitchReadout = memo(function PitchReadout({ listening, octaveUp }: { reado
 
 export const MicrophonePanel = memo(function MicrophonePanel({ floating = false }: { readonly floating?: boolean }) {
   const state = useMicrophoneState()
+  const expandedSpectrum = floating && state.spectrum
   const status = state.status === "listening" ? "Listening" : state.status === "requesting" ? "Starting mic…" : state.status === "error" ? "Check microphone" : "Microphone off"
   return (
-    <section className={`voice-panel${floating ? " voice-floating" : " voice-overlay"}`} aria-label="Live singing note">
+    <section className={`voice-panel${floating ? " voice-floating" : " voice-overlay"}${expandedSpectrum ? " voice-spectrum-expanded" : ""}`}
+      aria-label={expandedSpectrum ? "Live voice spectrum" : "Live singing note"}>
       <header className="voice-titlebar">
         <span className={`voice-status-dot ${state.status}`} />
-        <span className="voice-title">Singing note</span>
+        <span className="voice-title">{expandedSpectrum ? "Voice spectrum" : "Singing note"}</span>
         <button type="button" className="voice-mode-btn" title={floating ? "Dock singing note over the piano roll" : "Move singing note to its own floating window"}
           onClick={() => api.setMicrophoneOptions({ mode: floating ? "overlay" : "floating" })}>
           {floating ? "Dock ↙" : "Pop out ↗"}
@@ -72,7 +74,7 @@ export const MicrophonePanel = memo(function MicrophonePanel({ floating = false 
         {state.status === "error" ? (
           <div className="voice-error" role="alert"><p>{state.error}</p><button type="button" onClick={retry}>Retry microphone</button></div>
         ) : <>
-          <PitchReadout listening={state.status === "listening"} octaveUp={state.octaveUp} />
+          {!expandedSpectrum && <PitchReadout listening={state.status === "listening"} octaveUp={state.octaveUp} />}
           <div className="voice-history-heading">
             <div className="voice-history-mode">
               <button type="button" className="voice-spectrum-toggle" role="switch" aria-checked={state.spectrum}

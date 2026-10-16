@@ -1,10 +1,12 @@
 import { createHash } from "node:crypto"
 import { MAX_VIDEO_SECONDS, type Note, TranscriptionFile, type Video } from "@floatfall/protocol"
 import { Midi } from "@tonejs/midi"
-import { Cache, Context, Data, Duration, Effect, Exit, FileSystem, Layer, Path, Schema } from "effect"
+import { Cache, Context, Data, Duration, Effect, Exit, FileSystem, Layer, Path, Schema, Semaphore } from "effect"
 import type { Stage } from "../../shared/ipc"
+import { WORKER_VERSION, type CacheAvailability, type JobProgress, type WorkerInspection } from "../../shared/worker"
+import { requestWorker } from "../workerTransport"
 import { AppState } from "./AppState"
-import { type CommandSpec, Settings } from "./Settings"
+import { type CommandSpec, type SettingsData, Settings } from "./Settings"
 import { fillTemplate, ToolError, Tools } from "./Tools"
 
 export class PipelineError extends Schema.TaggedError<PipelineError>()("PipelineError", {
@@ -23,6 +25,9 @@ export class JobKey extends Data.Class<{
   readonly url: string
   readonly cleanVocals: boolean
   readonly specHash: string
+  /** Frozen local settings so queued work cannot run under a different cache key. */
+  readonly config?: string
+  readonly remote?: { readonly url: string; readonly token: string; readonly inspection: WorkerInspection }
 }> {
   get id() {
     return `${this.videoId}|${this.cleanVocals ? "vocals" : "mix"}|${this.specHash}`
@@ -34,6 +39,7 @@ export interface Transcription {
   readonly videoId: string
   readonly notes: ReadonlyArray<Note>
 }
+type ProcessingSettings = Pick<SettingsData, "ytDlpPath" | "ffmpegPath" | "downloadFormat" | "sampleRate" | "cacheDir" | "separator" | "transcriber">
 
 const shortHash = (value: unknown) => createHash("sha1").update(JSON.stringify(value)).digest("hex").slice(0, 10)
 
@@ -57,9 +63,12 @@ const normalizeNotes = (notes: ReadonlyArray<Note>): ReadonlyArray<Note> =>
 
 export class Pipeline extends Context.Service<Pipeline, {
   /** Builds the cache key for a video with the current settings. */
-  keyFor(video: Video, cleanVocals: boolean): Effect.Effect<JobKey>
+  keyFor(video: Video, cleanVocals: boolean, localOnly?: boolean): Effect.Effect<JobKey, PipelineError>
   /** Download -> extract audio -> (separate vocals) -> transcribe. Memoized per key. */
   transcribe(key: JobKey): Effect.Effect<Transcription, PipelineError>
+  /** Worker entry point: never forwards to another server or changes the local UI. */
+  transcribeLocal(key: JobKey, progress: (value: JobProgress) => Effect.Effect<void>): Effect.Effect<Transcription, PipelineError>
+  cacheFor(key: JobKey): Effect.Effect<CacheAvailability>
   /** Forgets in-memory results (e.g. after the cache dir was wiped). */
   readonly invalidateAll: Effect.Effect<void>
 }>()("floatfall/main/Pipeline") {
@@ -71,6 +80,11 @@ export class Pipeline extends Context.Service<Pipeline, {
       const tools = yield* Tools
       const settings = yield* Settings
       const appState = yield* AppState
+      const listeners = new Map<string, Set<(value: JobProgress) => Effect.Effect<void>>>()
+      const latestProgress = new Map<string, JobProgress>()
+      const slot = yield* Semaphore.make(1)
+      const configFor = (key: JobKey): Effect.Effect<ProcessingSettings> => key.config
+        ? Effect.sync(() => JSON.parse(key.config!) as ProcessingSettings) : settings.get
 
       const fail = (stage: Stage, message: string) => new PipelineError({ stage, message })
       const fromToolError = (stage: Stage) => (error: ToolError) => fail(stage, error.message)
@@ -79,8 +93,11 @@ export class Pipeline extends Context.Service<Pipeline, {
       const reporter = (key: JobKey, stage: Stage) => {
         let lastAt = 0
         let lastProgress: number | null = null
-        const report = (progress: number | null, message: string | null) =>
-          appState.setJob(key.id, { stage, progress, message })
+        const report = (progress: number | null, message: string | null) => Effect.suspend(() => {
+          const value = { stage, progress, message }
+          latestProgress.set(key.id, value)
+          return Effect.forEach([...(listeners.get(key.id) ?? [])], (listener) => listener(value)).pipe(Effect.asVoid)
+        })
         return {
           start: (message: string | null) => report(null, message),
           line: (line: string, pattern: RegExp = PERCENT) =>
@@ -124,7 +141,7 @@ export class Pipeline extends Context.Service<Pipeline, {
       const download = Effect.fn("Pipeline.download")(function*(key: JobKey, dir: string) {
         const existing = yield* findMedia(dir)
         if (existing) return path.join(dir, existing)
-        const s = yield* settings.get
+        const s = yield* configFor(key)
         const r = reporter(key, "downloading")
         yield* r.start("Downloading (low quality)…")
         yield* tools.run({
@@ -159,7 +176,7 @@ export class Pipeline extends Context.Service<Pipeline, {
       const extractAudio = Effect.fn("Pipeline.extractAudio")(function*(
         key: JobKey, dir: string, media: string, sampleRate: number, channels: number, filename: string
       ) {
-        const s = yield* settings.get
+        const s = yield* configFor(key)
         const r = reporter(key, "extracting")
         return yield* cached(path.join(dir, filename), (partial) =>
           r.start("Extracting audio…").pipe(
@@ -183,10 +200,11 @@ export class Pipeline extends Context.Service<Pipeline, {
         target: string
       ) =>
         Effect.gen(function*() {
+          if (yield* exists(target)) return target
           if (spec.command.trim() === "") {
             return yield* fail(stage, `${label} is not configured. Set "${stage === "separating" ? "separator" : "transcriber"}.command" in settings.json.`)
           }
-          const s = yield* settings.get
+          const s = yield* configFor(key)
           const r = reporter(key, stage)
           return yield* cached(target, (partial) =>
             r.start(`${label}…`).pipe(
@@ -230,26 +248,37 @@ export class Pipeline extends Context.Service<Pipeline, {
       })
 
       const lookup = Effect.fn("Pipeline.lookup")(function*(key: JobKey) {
-        const s = yield* settings.get
-        const dir = path.join(yield* settings.cacheDir, key.videoId)
+        const s = yield* configFor(key)
+        const dir = path.join(s.cacheDir, key.videoId)
         yield* fs.makeDirectory(dir, { recursive: true }).pipe(Effect.mapError((e) => fail("downloading", e.message)))
 
-        const media = yield* download(key, dir)
-        let audio = yield* extractAudio(
-          key, dir, media,
-          key.cleanVocals ? 44100 : s.sampleRate,
-          key.cleanVocals ? 2 : 1,
-          key.cleanVocals ? "audio.stereo.44100.wav" : `audio.${s.sampleRate}.wav`
-        )
+        const ext = s.transcriber.output === "midi" ? "mid" : "json"
+        const notesTarget = path.join(dir, `notes.${key.cleanVocals ? "vocals" : "mix"}.${key.specHash}.${ext}`)
+        if (yield* exists(notesTarget)) {
+          return { key: key.id, videoId: key.videoId, notes: yield* parseNotes(notesTarget, s.transcriber.output) }
+        }
+        const audioFilename = key.cleanVocals ? "audio.stereo.44100.wav" : `audio.${s.sampleRate}.wav`
+        const vocalsTarget = path.join(dir, `vocals.${separatorHashOf(s.separator)}.wav`)
+        const preparedVocals = path.join(dir, `audio.vocals.${separatorHashOf(s.separator)}.${s.sampleRate}.wav`)
+        let audio = path.join(dir, audioFilename)
+        const hasVocals = key.cleanVocals && (yield* exists(vocalsTarget))
+        const hasPreparedVocals = key.cleanVocals && (yield* exists(preparedVocals))
+        if (!hasVocals && !hasPreparedVocals && !(yield* exists(audio))) {
+          const media = yield* download(key, dir)
+          audio = yield* extractAudio(key, dir, media, key.cleanVocals ? 44100 : s.sampleRate,
+            key.cleanVocals ? 2 : 1, audioFilename)
+        }
 
-        if (key.cleanVocals) {
-          audio = yield* runModel(
+        if (hasPreparedVocals) {
+          audio = preparedVocals
+        } else if (key.cleanVocals) {
+          audio = hasVocals ? vocalsTarget : yield* runModel(
             key,
             "separating",
             "Vocal separation",
             s.separator,
             audio,
-            path.join(dir, `vocals.${separatorHashOf(s.separator)}.wav`)
+            vocalsTarget
           )
           // Preserve stereo detail during separation; only then prepare model input.
           audio = yield* extractAudio(
@@ -258,14 +287,13 @@ export class Pipeline extends Context.Service<Pipeline, {
           )
         }
 
-        const ext = s.transcriber.output === "midi" ? "mid" : "json"
         const notesFile = yield* runModel(
           key,
           "transcribing",
           "Transcription",
           s.transcriber,
           audio,
-          path.join(dir, `notes.${key.cleanVocals ? "vocals" : "mix"}.${key.specHash}.${ext}`)
+          notesTarget
         )
         const notes = yield* parseNotes(notesFile, s.transcriber.output)
         return { key: key.id, videoId: key.videoId, notes } satisfies Transcription
@@ -274,30 +302,92 @@ export class Pipeline extends Context.Service<Pipeline, {
       // In-memory memo on top of the on-disk cache: switching back to a tab is
       // instant, concurrent requests for the same key share one run, and the
       // run is interrupted once nobody is waiting for it anymore.
-      const cache = yield* Cache.makeWith(lookup, {
+      const cache = yield* Cache.makeWith((key: JobKey) => slot.withPermit(lookup(key)).pipe(
+        Effect.ensuring(Effect.sync(() => latestProgress.delete(key.id)))
+      ), {
         capacity: 32,
         timeToLive: (exit) => (Exit.isSuccess(exit) ? Duration.infinity : Duration.zero)
       })
 
+      const keyFor = (video: Video, cleanVocals: boolean, localOnly = false): Effect.Effect<JobKey, PipelineError> =>
+        Effect.gen(function*() {
+          const s = yield* settings.get
+          if (!localOnly && s.remote.url.trim()) {
+            const inspection = (yield* Effect.tryPromise({
+              try: (signal) => requestWorker(s.remote, { version: WORKER_VERSION, action: "inspect", videoId: video.videoId, cleanVocals }, () => {}, signal),
+              catch: (error) => fail("queued", error instanceof Error ? error.message : String(error))
+            })) as WorkerInspection
+            return new JobKey({ videoId: video.videoId, url: video.url, cleanVocals,
+              specHash: shortHash({ remote: s.remote.url, key: inspection.key }),
+              remote: { ...s.remote, inspection } })
+          }
+          return new JobKey({
+            videoId: video.videoId,
+            url: video.url,
+            cleanVocals,
+            config: JSON.stringify({ ytDlpPath: s.ytDlpPath, ffmpegPath: s.ffmpegPath,
+              downloadFormat: s.downloadFormat, sampleRate: s.sampleRate, cacheDir: yield* settings.cacheDir,
+              separator: s.separator, transcriber: s.transcriber }),
+            specHash: shortHash({
+              t: specHashOf(s.transcriber),
+              o: s.transcriber.output,
+              s: cleanVocals ? separatorHashOf(s.separator) : null,
+              f: s.downloadFormat,
+              r: s.sampleRate
+            })
+          })
+        })
+
+      const transcribeLocal = (key: JobKey, progress: (value: JobProgress) => Effect.Effect<void>) =>
+        Effect.acquireUseRelease(
+          Effect.sync(() => {
+            const subscribers = listeners.get(key.id) ?? new Set()
+            subscribers.add(progress); listeners.set(key.id, subscribers)
+          }),
+          () => Effect.gen(function*() {
+            yield* progress(latestProgress.get(key.id) ?? { stage: "queued", progress: null, message: "Waiting for local worker…" })
+            return yield* Cache.get(cache, key)
+          }),
+          () => Effect.sync(() => {
+            const subscribers = listeners.get(key.id)
+            subscribers?.delete(progress)
+            if (!subscribers?.size) listeners.delete(key.id)
+          })
+        )
+
       return Pipeline.of({
-        keyFor: (video, cleanVocals) =>
-          settings.get.pipe(
-            Effect.map((s) =>
-              new JobKey({
-                videoId: video.videoId,
-                url: video.url,
-                cleanVocals,
-                specHash: shortHash({
-                  t: specHashOf(s.transcriber),
-                  o: s.transcriber.output,
-                  s: cleanVocals ? separatorHashOf(s.separator) : null,
-                  f: s.downloadFormat,
-                  r: s.sampleRate
-                })
-              })
-            )
-          ),
-        transcribe: (key) => Cache.get(cache, key),
+        keyFor,
+        transcribeLocal,
+        cacheFor: (key) => Effect.gen(function*() {
+          const s = yield* configFor(key)
+          const dir = path.join(s.cacheDir, key.videoId)
+          const ext = s.transcriber.output === "midi" ? "mid" : "json"
+          return {
+            media: !!(yield* findMedia(dir)),
+            audio: yield* exists(path.join(dir, key.cleanVocals ? "audio.stereo.44100.wav" : `audio.${s.sampleRate}.wav`)),
+            vocals: key.cleanVocals && ((yield* exists(path.join(dir, `vocals.${separatorHashOf(s.separator)}.wav`))) ||
+              (yield* exists(path.join(dir, `audio.vocals.${separatorHashOf(s.separator)}.${s.sampleRate}.wav`)))),
+            notes: yield* exists(path.join(dir, `notes.${key.cleanVocals ? "vocals" : "mix"}.${key.specHash}.${ext}`))
+          }
+        }),
+        transcribe: (key) => {
+          if (!key.remote) return transcribeLocal(key, (value) => appState.setJob(key.id, value))
+          const remote = key.remote
+          return Effect.gen(function*() {
+            yield* appState.setJob(key.id, { stage: "queued", progress: null,
+              message: remote.inspection.cache.notes ? "Loading cached notes from worker…" : remote.inspection.cache.vocals
+                ? "Worker will reuse cached vocals…" : remote.inspection.cache.audio ? "Worker will reuse cached audio…" : "Sending job to worker…" })
+            const context = yield* Effect.context<never>()
+            const fork = Effect.runForkWith(context)
+            const notes = (yield* Effect.tryPromise({
+              try: (signal) => requestWorker(remote, { version: WORKER_VERSION, action: "run", videoId: key.videoId,
+                cleanVocals: key.cleanVocals, expectedKey: remote.inspection.key },
+              (value) => fork(appState.setJob(key.id, { ...value, message: value.message ? `Worker: ${value.message}` : "Remote worker" })), signal),
+              catch: (error) => fail("transcribing", error instanceof Error ? error.message : String(error))
+            })) as ReadonlyArray<Note>
+            return { key: key.id, videoId: key.videoId, notes }
+          })
+        },
         invalidateAll: Cache.invalidateAll(cache)
       })
     })

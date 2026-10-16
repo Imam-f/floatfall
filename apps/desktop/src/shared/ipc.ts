@@ -1,5 +1,6 @@
 import type { Note, Playback, Video } from "@floatfall/protocol"
 import type { MicrophoneOptions, MicrophoneReport, MicrophoneSnapshot, MicrophoneState, PitchFrame } from "./microphone"
+import type { CacheAvailability } from "./worker"
 
 export type Stage =
   | "idle"
@@ -27,6 +28,12 @@ export interface UiOptions {
 }
 
 export interface UiState {
+  readonly processing: {
+    readonly target: "local" | "remote"
+    readonly worker: "off" | "listening" | "error"
+    readonly workerMessage: string | null
+    readonly cache: CacheAvailability | null
+  }
   readonly extensionConnected: boolean
   readonly video: Video | null
   readonly job: JobStatus
@@ -95,6 +102,7 @@ export interface FloatfallApi {
 }
 
 export const initialUiState: UiState = {
+  processing: { target: "local", worker: "off", workerMessage: null, cache: null },
   extensionConnected: false,
   video: null,
   job: { key: null, stage: "idle", progress: null, message: null },

@@ -34,8 +34,9 @@ export class Controller extends Context.Service<Controller, {
           appState.update((state) => ({
             ...state,
             options: { ...state.options, cleanVocals: s.cleanVocals, autoTranscribe: s.autoTranscribe },
-            separatorConfigured: s.separator.command.trim() !== "",
-            transcriberConfigured: s.transcriber.command.trim() !== ""
+            separatorConfigured: !!s.remote.url.trim() || s.separator.command.trim() !== "",
+            transcriberConfigured: !!s.remote.url.trim() || s.transcriber.command.trim() !== "",
+            processing: { ...state.processing, target: s.remote.url.trim() ? "remote" : "local", cache: null }
           }))
         ),
         Effect.forkScoped
@@ -47,7 +48,7 @@ export class Controller extends Context.Service<Controller, {
           Stream.map((s) => `${s.video?.videoId ?? ""}|${s.options.cleanVocals}|${s.options.autoTranscribe}`)
         ),
         settings.changes.pipe(
-          Stream.map((s) => JSON.stringify([s.transcriber, s.separator, s.downloadFormat, s.sampleRate, s.cacheDir]))
+          Stream.map((s) => JSON.stringify([s.transcriber, s.separator, s.downloadFormat, s.sampleRate, s.cacheDir, s.remote]))
         )
       )
       yield* triggers.pipe(
@@ -59,11 +60,16 @@ export class Controller extends Context.Service<Controller, {
 
       /** Active jobs keyed by their settings-sensitive cache key. */
       const running = new Map<string, { fiber?: Fiber.Fiber<void, never> }>()
+      const preparing = new Set<{ fiber?: Fiber.Fiber<void, never> }>()
+      let generation = 0
 
-      const start = (video: Video) =>
+      const start = (video: Video, requestedGeneration: number) =>
         Effect.gen(function*() {
           const { options } = yield* SubscriptionRef.get(appState.state)
           const key = yield* pipeline.keyFor(video, options.cleanVocals)
+          const latest = yield* SubscriptionRef.get(appState.state)
+          if (requestedGeneration !== generation || latest.video?.videoId !== video.videoId || latest.options.cleanVocals !== options.cleanVocals) return
+          yield* appState.update((s) => ({ ...s, processing: { ...s.processing, cache: key.remote?.inspection.cache ?? null } }))
           const current = yield* SubscriptionRef.get(appState.notes)
           if (current.key === key.id) {
             // Already on screen; just make sure the status reflects it.
@@ -117,11 +123,25 @@ export class Controller extends Context.Service<Controller, {
           )
         })
 
-      const stop = (message: string | null) =>
-        Effect.forEach([...running.values()], (entry) =>
+      const launch = (video: Video) => Effect.gen(function*() {
+        const requestedGeneration = ++generation
+        const self: { fiber?: Fiber.Fiber<void, never> } = {}
+        preparing.add(self)
+        yield* appState.update((s) => ({ ...s, job: { key: null, stage: "queued", progress: null, message: "Checking processing cache…" } }))
+        self.fiber = yield* start(video, requestedGeneration).pipe(
+          Effect.catch((error) => appState.update((s) => requestedGeneration === generation
+            ? { ...s, job: { key: null, stage: "error", progress: null, message: error.message } } : s)),
+          Effect.ensuring(Effect.sync(() => preparing.delete(self))),
+          Effect.forkScoped
+        )
+      })
+
+      const stop = (message: string | null) => Effect.suspend(() => {
+        generation++
+        return Effect.forEach([...preparing, ...running.values()], (entry) =>
           entry.fiber ? Fiber.interrupt(entry.fiber) : Effect.void
         ).pipe(
-          Effect.andThen(Effect.sync(() => running.clear())),
+          Effect.andThen(Effect.sync(() => { running.clear(); preparing.clear() })),
           Effect.andThen(
             appState.update((s) =>
               s.job.stage === "done" || s.job.stage === "idle"
@@ -130,6 +150,7 @@ export class Controller extends Context.Service<Controller, {
             )
           )
         )
+      })
 
       const process = Effect.fn("Controller.process")(function*(command: Command) {
         const state = yield* SubscriptionRef.get(appState.state)
@@ -137,14 +158,14 @@ export class Controller extends Context.Service<Controller, {
           case "Cancel":
             return yield* stop("Cancelled")
           case "Manual":
-            return state.video ? yield* start(state.video) : undefined
+            return state.video ? yield* launch(state.video) : undefined
           case "Auto": {
             if (!state.video) return
             if (!state.options.autoTranscribe || !state.transcriberConfigured) {
               // Existing jobs continue; this only prevents starting another one.
               return
             }
-            return yield* start(state.video)
+            return yield* launch(state.video)
           }
         }
       })

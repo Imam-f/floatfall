@@ -139,6 +139,40 @@ To test the plumbing without a real model, use the stubs in `examples/`:
 "transcriber": { "command": "node", "args": ["<repo>/examples/fake-transcriber.mjs", "{input}", "{output}"] }
 ```
 
+## Processing on another instance
+
+Every desktop instance can process its own videos, serve as a worker for other instances, or do both. Set these options in each machine's `settings.json` using the title-bar settings button. Changes apply when the file is saved.
+
+On the machine with your models/GPU, keep your separator and transcriber commands configured and add:
+
+```json
+"worker": {
+  "enabled": true,
+  "host": "0.0.0.0",
+  "port": 47616,
+  "token": "replace-with-a-long-random-shared-secret"
+}
+```
+
+Generate a token with `node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"`, then copy it to the client configuration. Tokens must contain at least 16 characters. The worker is disabled by default and binds to `127.0.0.1` unless you choose another host. Use `0.0.0.0` to accept connections from other machines and allow inbound TCP port 47616 in the worker's firewall.
+
+On the machine where you watch YouTube, add the worker's LAN or VPN address:
+
+```json
+"remote": {
+  "url": "ws://192.168.1.50:47616",
+  "token": "replace-with-a-long-random-shared-secret"
+}
+```
+
+An empty `remote.url` uses local processing. A configured remote worker handles downloading, audio extraction, optional cleaning, and transcription using **its own** model commands and sample rate. The client needs no model installation, `yt-dlp`, or `ffmpeg`. Only the YouTube video ID and cleaning choice are sent; microphone analysis remains on the client. Worker requests always execute locally, even if that instance also has a remote worker configured, so instances cannot accidentally forward jobs in a loop.
+
+The **Remote** badge shows where processing runs; hover over it to see which matching stages are cached on the worker. The **Worker** badge indicates an active server, and its tooltip includes the listen address. Startup errors also appear there. Progress and errors stream back to the requesting instance. Cancel, disconnect, or closing the client releases its job; shared work continues while another client still needs it. Each worker processes one distinct job at a time to avoid competing for GPU memory, while identical requests share a run. A lost connection shows an error; use Retry after reconnecting.
+
+Before a remote job starts, the client checks the worker's cache and model fingerprint. Completed notes are returned directly, even if original media was removed. Otherwise, cached vocals or extracted audio skip the corresponding earlier stages. Different cleaning modes and changed model settings use different results. The worker keeps the shared disk cache, so repeated requests from any client can reuse it across worker restarts. Cache inspection exchanges fingerprints and availability rather than model commands or credentials.
+
+Use `ws://` on a trusted LAN or VPN. For encrypted connections across other networks, put the worker behind a TLS WebSocket proxy and use a `wss://` URL. This worker protocol is separate from the browser extension's local bridge on port 47615.
+
 ## Caching
 
 - **On disk:** each stage writes into `<cache>/<videoId>/`. Each tool first writes a `*.partial.*` file, which is renamed only when the tool succeeds, so a cancelled run never leaves a broken result behind. Separator and transcriber output files are named with a hash of their command settings. Changing a command in settings re-runs only the stages that it affects.

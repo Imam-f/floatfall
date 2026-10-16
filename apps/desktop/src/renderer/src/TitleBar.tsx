@@ -85,6 +85,7 @@ export const TitleBar = memo(function TitleBar({ state }: { readonly state: UiSt
   const { job, video, options } = state
   const busy = isBusy(job.stage)
   const title = video?.title || (state.extensionConnected ? "Open a YouTube video" : "Waiting for browser extension…")
+  const cached = state.processing.cache ? Object.entries(state.processing.cache).filter(([, available]) => available).map(([stage]) => stage) : []
 
   return (
     <header className="titlebar">
@@ -101,6 +102,13 @@ export const TitleBar = memo(function TitleBar({ state }: { readonly state: UiSt
       )}
       <div className="spacer" />
       <div className="controls">
+        {(state.processing.target === "remote" || state.processing.worker !== "off") && (
+          <span className={`processing-badge${state.processing.worker === "error" ? " error" : ""}`}
+            title={[state.processing.target === "remote" ? `Remote processing${cached.length ? ` · cached: ${cached.join(", ")}` : ""}` : "Local processing",
+              state.processing.workerMessage].filter(Boolean).join("\n")}>
+            {state.processing.target === "remote" ? "Remote" : state.processing.worker === "error" ? "Worker error" : "Worker"}
+          </span>
+        )}
         <MicrophoneToggle />
         <Toggle
           label="Clean vocals"

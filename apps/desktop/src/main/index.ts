@@ -7,6 +7,7 @@ import { Controller } from "./services/Controller"
 import { Pipeline } from "./services/Pipeline"
 import { AppPaths, Settings } from "./services/Settings"
 import { Tools } from "./services/Tools"
+import { Worker } from "./services/Worker"
 import { WindowLayer } from "./window"
 
 // One instance only: a second one could not bind the bridge port anyway.
@@ -16,7 +17,7 @@ if (!app.requestSingleInstanceLock()) {
   void app.whenReady().then(() => {
     const MainLayer = WindowLayer.pipe(
       Layer.provide(Controller.layer),
-      Layer.provideMerge(Bridge.layer),
+      Layer.provideMerge(Layer.mergeAll(Bridge.layer, Worker.layer)),
       Layer.provideMerge(Pipeline.layer),
       Layer.provideMerge(Layer.mergeAll(Settings.layer, Tools.layer, AppState.layer)),
       Layer.provide(NodeServices.layer),

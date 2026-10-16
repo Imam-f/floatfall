@@ -1,4 +1,5 @@
 import { Context, Effect, FileSystem, Layer, Path, Schema, Stream, SubscriptionRef } from "effect"
+import { WORKER_PORT } from "../../shared/worker"
 
 /**
  * Paths provided by Electron (`app.getPath`). Kept as a service so the Effect
@@ -31,6 +32,17 @@ export const TranscriberSpec = Schema.Struct({
 })
 export type TranscriberSpec = typeof TranscriberSpec.Type
 
+const RemoteSettings = Schema.Struct({
+  url: Schema.String.pipe(Schema.withDecodingDefaultKey(Effect.succeed(""))),
+  token: Schema.String.pipe(Schema.withDecodingDefaultKey(Effect.succeed("")))
+})
+const WorkerSettings = Schema.Struct({
+  enabled: Schema.Boolean.pipe(Schema.withDecodingDefaultKey(Effect.succeed(false))),
+  host: Schema.String.pipe(Schema.withDecodingDefaultKey(Effect.succeed("127.0.0.1"))),
+  port: Schema.Int.pipe(Schema.withDecodingDefaultKey(Effect.succeed(WORKER_PORT))),
+  token: Schema.String.pipe(Schema.withDecodingDefaultKey(Effect.succeed("")))
+})
+
 export const SettingsSchema = Schema.Struct({
   ytDlpPath: Schema.String.pipe(Schema.withDecodingDefaultKey(Effect.succeed("yt-dlp"))),
   ffmpegPath: Schema.String.pipe(Schema.withDecodingDefaultKey(Effect.succeed("ffmpeg"))),
@@ -43,6 +55,8 @@ export const SettingsSchema = Schema.Struct({
   cacheDir: Schema.String.pipe(Schema.withDecodingDefaultKey(Effect.succeed(""))),
   cleanVocals: Schema.Boolean.pipe(Schema.withDecodingDefaultKey(Effect.succeed(false))),
   autoTranscribe: Schema.Boolean.pipe(Schema.withDecodingDefaultKey(Effect.succeed(true))),
+  remote: RemoteSettings.pipe(Schema.withDecodingDefaultKey(Effect.succeed({ url: "", token: "" }))),
+  worker: WorkerSettings.pipe(Schema.withDecodingDefaultKey(Effect.succeed({ enabled: false, host: "127.0.0.1", port: WORKER_PORT, token: "" }))),
   separator: CommandSpec.pipe(
     Schema.withDecodingDefaultKey(Effect.succeed({ command: "", args: ["{input}", "{output}"] }))
   ),
