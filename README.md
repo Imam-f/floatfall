@@ -14,6 +14,8 @@ A Chrome extension and an Electron app that work together. The extension finds t
 
 Model wrappers are included for BS-RoFormer vocal isolation and MuScriptor melody transcription. Choose and download them from the desktop app’s **Settings → Models** menu, or configure custom commands as shown below.
 
+![floatfall desktop app showing sample melody notes on the piano roll](assets/screenshot.png)
+
 ```
 apps/extension   Chrome MV3 extension (Effect background worker, tiny content script, React popup)
 apps/desktop     Electron app (Effect services in main, React + canvas renderer)
